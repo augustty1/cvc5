@@ -14,6 +14,7 @@
 #define CVC5__THEORY__BV__LS__LS_VALUE_H
 
 #include "util/bitvector.h"
+#include "util/random.h"
 
 namespace cvc5::internal {
 namespace theory {
@@ -21,6 +22,48 @@ namespace bv {
 namespace ls {
 
 using LsValue = cvc5::internal::BitVector;
+
+/**
+ * The random number generator of the local search.
+ *
+ * It owns its own cvc5::internal::Random and never uses the global
+ * Random::getRandom() singleton, so other components cannot perturb a run.
+ * All methods are built on the raw 64-bit draws of the underlying
+ * std::mt19937_64 (no std distributions), so a seed yields the same sequence
+ * on every platform.
+ */
+class LsRng
+{
+ public:
+  explicit LsRng(uint64_t seed);
+
+  /** Return true with probability perMille / 1000 (perMille <= 1000). */
+  bool pickWithProb(uint32_t perMille);
+
+  /** Return true with probability 1/2. */
+  bool flipCoin();
+
+  /** Return a uniform index in [0, n). Requires n > 0. */
+  uint32_t pickIndex(uint32_t n);
+
+  /** Return a uniform value of width w. Requires w > 0. */
+  LsValue randomValue(uint32_t w);
+
+  /**
+   * Return a uniform value in the unsigned range [lo, hi]. Requires lo and hi
+   * to have the same width and lo <= hi.
+   */
+  LsValue randomInRange(const LsValue& lo, const LsValue& hi);
+
+  /** Return a uniform value of the width of s that is different from s. */
+  LsValue randomNotEqual(const LsValue& s);
+
+ private:
+  /** Return a uniform integer in [0, 2^nbits). */
+  Integer randomBits(uint32_t nbits);
+
+  Random d_rng;
+};
 
 /** Return true if all bits of x are 0. */
 bool isZero(const LsValue& x);

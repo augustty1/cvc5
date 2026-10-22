@@ -103,6 +103,88 @@ uint32_t shiftAmount(const LsValue& s, uint32_t w)
   return s.getValue().getUnsignedInt();
 }
 
+LsRng::LsRng(uint64_t seed) : d_rng(seed) {}
+
+bool LsRng::pickWithProb(uint32_t perMille)
+{
+  Assert(perMille <= 1000);
+  return pickIndex(1000) < perMille;
+}
+
+bool LsRng::flipCoin() { return pickWithProb(500); }
+
+uint32_t LsRng::pickIndex(uint32_t n)
+{
+  Assert(n > 0);
+  uint64_t n64 = n;
+  uint64_t threshold = (0 - n64) % n64;
+  uint64_t r;
+  do
+  {
+    r = d_rng();
+  } while (r < threshold);
+  return static_cast<uint32_t>(r % n64);
+}
+
+Integer LsRng::randomBits(uint32_t nbits)
+{
+  Integer res(0);
+  // Full 64-bit words first.
+  uint32_t i = 0;
+  for (; i + 64 <= nbits; i += 64)
+  {
+    res = res.multiplyByPow2(64) + Integer(d_rng());
+  }
+  // The remaining (fewer than 64) bits come from the top of one more draw.
+  uint32_t rest = nbits - i;
+  if (rest > 0)
+  {
+    res = res.multiplyByPow2(rest) + Integer(d_rng() >> (64 - rest));
+  }
+  return res;
+}
+
+LsValue LsRng::randomValue(uint32_t w)
+{
+  Assert(w > 0);
+  return LsValue(w, randomBits(w));
+}
+
+LsValue LsRng::randomInRange(const LsValue& lo, const LsValue& hi)
+{
+  Assert(lo.getSize() == hi.getSize());
+  Assert(lo.unsignedLessThanEq(hi));
+  uint32_t w = lo.getSize();
+  Integer range = hi.getValue() - lo.getValue();
+  if (range.isZero())
+  {
+    return lo;
+  }
+  if (isZero(lo) && isOnes(hi))
+  {
+    return randomValue(w);
+  }
+  uint32_t nbits = range.length();
+  Integer r;
+  do
+  {
+    r = randomBits(nbits);
+  } while (r > range);
+  return LsValue(w, lo.getValue() + r);
+}
+
+LsValue LsRng::randomNotEqual(const LsValue& s)
+{
+  uint32_t w = s.getSize();
+  Assert(w > 0);
+  LsValue r = randomInRange(LsValue::mkZero(w), dec(LsValue::mkOnes(w)));
+  if (!r.unsignedLessThan(s))
+  {
+    r = inc(r);
+  }
+  return r;
+}
+
 }  // namespace ls
 }  // namespace bv
 }  // namespace theory
