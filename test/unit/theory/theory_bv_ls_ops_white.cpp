@@ -9,6 +9,10 @@
  * (theory/bv/ls/ls_ops.h).
  */
 
+#include <set>
+#include <string>
+#include <vector>
+
 #include "test.h"
 #include "theory/bv/ls/ls_ops.h"
 #include "theory/bv/ls/ls_value.h"
@@ -291,6 +295,331 @@ TEST_F(TestTheoryWhiteBvLsOps, value_overflow_modInverse_setSlice_shift_wide)
     ASSERT_EQ(shiftAmount(LsValue(w, w), w), w);
     ASSERT_EQ(shiftAmount(ones, w), w);
     ASSERT_EQ(shiftAmount(msbOnly, w), w);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Random number generator                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Draw one of each kind from rng and append the results to out. Used to
+ * compare whole sequences between generators.
+ */
+static void drawMixed(LsRng& rng, std::vector<std::string>& out)
+{
+  out.push_back(std::to_string(rng.pickIndex(1000)));
+  out.push_back(std::to_string(rng.pickWithProb(300)));
+  out.push_back(std::to_string(rng.flipCoin()));
+  out.push_back(rng.randomValue(7).toString());
+  out.push_back(rng.randomValue(130).toString());
+  out.push_back(
+      rng.randomInRange(LsValue(16, 100u), LsValue(16, 5000u)).toString());
+  out.push_back(rng.randomNotEqual(LsValue(8, 42u)).toString());
+}
+
+/** The same seed gives the same sequence; different seeds do not. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_deterministic)
+{
+  for (uint64_t seed : {0ull, 1ull, 42ull, 0xdeadbeefcafebabeull})
+  {
+    LsRng a(seed), b(seed);
+    std::vector<std::string> sa, sb;
+    for (uint32_t i = 0; i < 200; ++i)
+    {
+      drawMixed(a, sa);
+      drawMixed(b, sb);
+    }
+    ASSERT_EQ(sa, sb) << "seed=" << seed;
+  }
+
+  LsRng a(1), b(2);
+  std::vector<std::string> sa, sb;
+  for (uint32_t i = 0; i < 50; ++i)
+  {
+    drawMixed(a, sa);
+    drawMixed(b, sb);
+  }
+  ASSERT_NE(sa, sb);
+}
+
+/** The generator does not touch the global Random singleton. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_independent_of_global)
+{
+  LsRng a(7), b(7);
+  std::vector<std::string> sa, sb;
+  for (uint32_t i = 0; i < 50; ++i)
+  {
+    drawMixed(a, sa);
+    // Perturb the global generator between the draws of b.
+    Random::getRandom()();
+    Random::getRandom().pick<uint32_t>();
+    drawMixed(b, sb);
+  }
+  ASSERT_EQ(sa, sb);
+}
+
+/** pickIndex stays in [0, n), hits every index, and is roughly uniform. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_pickIndex)
+{
+  LsRng rng(3);
+  for (uint32_t i = 0; i < 100; ++i)
+  {
+    ASSERT_EQ(rng.pickIndex(1), 0u);
+  }
+  for (uint32_t n : {2u, 3u, 7u, 10u, 1000u})
+  {
+    const uint32_t perBucket = 1000;
+    std::vector<uint32_t> count(n, 0);
+    for (uint32_t i = 0; i < n * perBucket; ++i)
+    {
+      uint32_t r = rng.pickIndex(n);
+      ASSERT_LT(r, n);
+      ++count[r];
+    }
+    for (uint32_t k = 0; k < n; ++k)
+    {
+      // Loose bound: about 6 standard deviations for perBucket = 1000.
+      ASSERT_GT(count[k], perBucket * 8 / 10) << "n=" << n << " k=" << k;
+      ASSERT_LT(count[k], perBucket * 12 / 10) << "n=" << n << " k=" << k;
+    }
+  }
+  // Large n, close to the 32-bit limit: still in range.
+  for (uint32_t n : {0x80000001u, 0xffffffffu})
+  {
+    for (uint32_t i = 0; i < 1000; ++i)
+    {
+      ASSERT_LT(rng.pickIndex(n), n);
+    }
+  }
+}
+
+/** pickWithProb: 0 and 1000 are certain, other values roughly match. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_pickWithProb_flipCoin)
+{
+  LsRng rng(11);
+  for (uint32_t i = 0; i < 1000; ++i)
+  {
+    ASSERT_FALSE(rng.pickWithProb(0));
+    ASSERT_TRUE(rng.pickWithProb(1000));
+  }
+  const uint32_t n = 100000;
+  for (uint32_t perMille : {1u, 100u, 250u, 500u, 999u})
+  {
+    uint32_t hits = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+      hits += rng.pickWithProb(perMille);
+    }
+    double expected = n * perMille / 1000.0;
+    // At most 5% relative error plus a small absolute slack for tiny p.
+    ASSERT_NEAR(hits, expected, expected * 0.05 + 30) << "p=" << perMille;
+  }
+  uint32_t heads = 0;
+  for (uint32_t i = 0; i < n; ++i)
+  {
+    heads += rng.flipCoin();
+  }
+  ASSERT_NEAR(heads, n / 2, n * 0.02);
+}
+
+/** randomValue for small widths: right width, every value is hit. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomValue_exhaustive)
+{
+  LsRng rng(5);
+  for (uint32_t w = 1; w <= 8; ++w)
+  {
+    uint32_t size = 1u << w;
+    std::vector<uint32_t> count(size, 0);
+    for (uint32_t i = 0; i < size * 200; ++i)
+    {
+      LsValue v = rng.randomValue(w);
+      ASSERT_EQ(v.getSize(), w);
+      ASSERT_TRUE(v.getValue() < Integer(size));
+      ++count[v.getValue().getUnsignedInt()];
+    }
+    for (uint32_t k = 0; k < size; ++k)
+    {
+      ASSERT_GT(count[k], 100u) << "w=" << w << " k=" << k;
+      ASSERT_LT(count[k], 300u) << "w=" << w << " k=" << k;
+    }
+  }
+}
+
+/**
+ * randomValue for wide widths: the value fits in w bits and every bit
+ * position, including the ones around the 64-bit word boundaries and the
+ * msb, takes both values.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomValue_wide)
+{
+  LsRng rng(9);
+  for (uint32_t w : {63u, 64u, 65u, 127u, 128u, 129u, 1000u})
+  {
+    const uint32_t n = 400;
+    std::vector<uint32_t> ones(w, 0);
+    Integer bound = Integer(2).pow(w);
+    for (uint32_t i = 0; i < n; ++i)
+    {
+      LsValue v = rng.randomValue(w);
+      ASSERT_EQ(v.getSize(), w);
+      ASSERT_TRUE(v.getValue() < bound);
+      for (uint32_t b = 0; b < w; ++b)
+      {
+        ones[b] += v.isBitSet(b);
+      }
+    }
+    for (uint32_t b = 0; b < w; ++b)
+    {
+      // Expected 200 with a standard deviation of 10.
+      ASSERT_GT(ones[b], 140u) << "w=" << w << " bit=" << b;
+      ASSERT_LT(ones[b], 260u) << "w=" << w << " bit=" << b;
+    }
+  }
+}
+
+/**
+ * randomInRange for all ranges of widths 1 to 4: every result is in
+ * [lo, hi] and every value in the range is hit.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomInRange_exhaustive)
+{
+  LsRng rng(13);
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    uint32_t ones = (1u << w) - 1;
+    for (uint32_t lo = 0; lo <= ones; ++lo)
+    {
+      for (uint32_t hi = lo; hi <= ones; ++hi)
+      {
+        LsValue vlo(w, lo), vhi(w, hi);
+        std::set<uint32_t> seen;
+        for (uint32_t i = 0; i < 400; ++i)
+        {
+          LsValue r = rng.randomInRange(vlo, vhi);
+          ASSERT_EQ(r.getSize(), w);
+          uint32_t v = r.getValue().getUnsignedInt();
+          ASSERT_GE(v, lo) << "w=" << w << " lo=" << lo << " hi=" << hi;
+          ASSERT_LE(v, hi) << "w=" << w << " lo=" << lo << " hi=" << hi;
+          seen.insert(v);
+        }
+        ASSERT_EQ(seen.size(), hi - lo + 1)
+            << "w=" << w << " lo=" << lo << " hi=" << hi;
+      }
+    }
+  }
+}
+
+/** randomInRange is roughly uniform on a range that is not a power of 2. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomInRange_uniform)
+{
+  LsRng rng(17);
+  // [3, 12] has 10 values, so rejection sampling draws 4 bits and rejects.
+  LsValue lo(8, 3u), hi(8, 12u);
+  std::vector<uint32_t> count(10, 0);
+  for (uint32_t i = 0; i < 10000; ++i)
+  {
+    ++count[rng.randomInRange(lo, hi).getValue().getUnsignedInt() - 3];
+  }
+  for (uint32_t k = 0; k < 10; ++k)
+  {
+    ASSERT_GT(count[k], 800u) << "k=" << k;
+    ASSERT_LT(count[k], 1200u) << "k=" << k;
+  }
+}
+
+/** randomInRange on wide values, including ranges across the 2^64 border. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomInRange_wide)
+{
+  LsRng rng(19);
+  for (uint32_t w : {65u, 128u, 1000u})
+  {
+    Integer two64 = Integer(2).pow(64);
+    // A small range straddling 2^64: all 7 values are hit.
+    LsValue lo(w, two64 - 3), hi(w, two64 + 3);
+    std::set<std::string> seen;
+    for (uint32_t i = 0; i < 300; ++i)
+    {
+      LsValue r = rng.randomInRange(lo, hi);
+      ASSERT_EQ(r.getSize(), w);
+      ASSERT_TRUE(lo.unsignedLessThanEq(r));
+      ASSERT_TRUE(r.unsignedLessThanEq(hi));
+      seen.insert(r.toString());
+    }
+    ASSERT_EQ(seen.size(), 7u) << "w=" << w;
+
+    // Singleton ranges and the full range.
+    LsValue ones = LsValue::mkOnes(w);
+    LsValue zero = LsValue::mkZero(w);
+    ASSERT_EQ(rng.randomInRange(lo, lo), lo);
+    ASSERT_EQ(rng.randomInRange(ones, ones), ones);
+    ASSERT_EQ(rng.randomInRange(zero, zero), zero);
+    bool msbSet = false, msbClear = false;
+    for (uint32_t i = 0; i < 100; ++i)
+    {
+      LsValue r = rng.randomInRange(zero, ones);
+      ASSERT_EQ(r.getSize(), w);
+      (msb(r) ? msbSet : msbClear) = true;
+    }
+    ASSERT_TRUE(msbSet && msbClear) << "w=" << w;
+
+    // A wide range [1, ones - 1]: never returns the excluded endpoints.
+    LsValue one = LsValue::mkOne(w);
+    LsValue onesMinus1 = dec(ones);
+    for (uint32_t i = 0; i < 200; ++i)
+    {
+      LsValue r = rng.randomInRange(one, onesMinus1);
+      ASSERT_FALSE(isZero(r));
+      ASSERT_FALSE(isOnes(r));
+    }
+  }
+}
+
+/**
+ * randomNotEqual for widths 1 to 4: never returns s and hits every other
+ * value.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomNotEqual_exhaustive)
+{
+  LsRng rng(23);
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    uint32_t ones = (1u << w) - 1;
+    for (uint32_t s = 0; s <= ones; ++s)
+    {
+      LsValue vs(w, s);
+      std::set<uint32_t> seen;
+      for (uint32_t i = 0; i < 400; ++i)
+      {
+        LsValue r = rng.randomNotEqual(vs);
+        ASSERT_EQ(r.getSize(), w);
+        ASSERT_NE(r, vs) << "w=" << w << " s=" << s;
+        seen.insert(r.getValue().getUnsignedInt());
+      }
+      ASSERT_EQ(seen.size(), ones) << "w=" << w << " s=" << s;
+    }
+  }
+}
+
+/** randomNotEqual on wide values, including s = 0 and s = ones. */
+TEST_F(TestTheoryWhiteBvLsOps, rng_randomNotEqual_wide)
+{
+  LsRng rng(29);
+  for (uint32_t w : {64u, 65u, 128u, 1000u})
+  {
+    for (const LsValue& s : {LsValue::mkZero(w),
+                             LsValue::mkOne(w),
+                             LsValue::mkOnes(w),
+                             LsValue::mkMinSigned(w),
+                             rng.randomValue(w)})
+    {
+      for (uint32_t i = 0; i < 100; ++i)
+      {
+        LsValue r = rng.randomNotEqual(s);
+        ASSERT_EQ(r.getSize(), w);
+        ASSERT_NE(r, s) << "w=" << w;
+      }
+    }
   }
 }
 
