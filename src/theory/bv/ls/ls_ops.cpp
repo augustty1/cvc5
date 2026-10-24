@@ -109,30 +109,167 @@ LsValue evaluate(const OpInfo& op, const std::vector<const LsValue*>& ch)
   Unreachable() << "evaluate called on leaf kind " << op.kind;
 }
 
-bool isInvertible(CVC5_UNUSED const OpInfo& op,
-                  CVC5_UNUSED uint32_t posX,
-                  CVC5_UNUSED const LsValue& t,
-                  CVC5_UNUSED const std::vector<const LsValue*>& ch)
+namespace {
+
+/** For CONCAT: the part of t that child posX must equal. */
+LsValue concatPartOf(uint32_t posX,
+                     const LsValue& t,
+                     const std::vector<const LsValue*>& ch)
 {
-  Unimplemented();
+  uint32_t w = t.getSize();
+  if (posX == 0)
+  {
+    return t.extract(w - 1, ch[1]->getSize());
+  }
+  return t.extract(ch[1]->getSize() - 1, 0);
 }
 
-LsValue inverseValue(CVC5_UNUSED const OpInfo& op,
-                     CVC5_UNUSED uint32_t posX,
-                     CVC5_UNUSED const LsValue& t,
-                     CVC5_UNUSED const std::vector<const LsValue*>& ch,
-                     CVC5_UNUSED LsRng& rng)
+/** For ITE: return true if posX is the branch selected by the condition. */
+bool iteIsEnabled(uint32_t posX, const std::vector<const LsValue*>& ch)
 {
-  Unimplemented();
+  Assert(posX == 1 || posX == 2);
+  return ch[0]->isBitSet(0) == (posX == 1);
 }
 
-LsValue consistentValue(CVC5_UNUSED const OpInfo& op,
-                        CVC5_UNUSED uint32_t posX,
-                        CVC5_UNUSED const LsValue& t,
-                        CVC5_UNUSED const std::vector<const LsValue*>& ch,
-                        CVC5_UNUSED LsRng& rng)
+/** The inverse value rules, see inverseValue. */
+LsValue computeInverse(const OpInfo& op,
+                       uint32_t posX,
+                       const LsValue& t,
+                       const std::vector<const LsValue*>& ch,
+                       LsRng& rng)
 {
-  Unimplemented();
+  uint32_t w = ch[posX]->getSize();
+  switch (op.kind)
+  {
+    case LsKind::NOT: return ~t;
+    case LsKind::AND:
+      // Bits where s is 1 must equal t, the others are free.
+      return t | (rng.randomValue(w) & ~*ch[1 - posX]);
+    case LsKind::EQ:
+      return t.isBitSet(0) ? *ch[1 - posX] : rng.randomNotEqual(*ch[1 - posX]);
+    case LsKind::ADD: return t - *ch[1 - posX];
+    case LsKind::CONCAT: return concatPartOf(posX, t, ch);
+    case LsKind::EXTRACT:
+    {
+      // Keep the bits outside [hi:lo] with probability 1/2.
+      LsValue x = rng.flipCoin() ? *ch[0] : rng.randomValue(w);
+      return setSlice(x, op.hi, op.lo, t);
+    }
+    case LsKind::ITE:
+    {
+      if (posX > 0)
+      {
+        return t;
+      }
+      bool a = *ch[1] == t;
+      bool b = *ch[2] == t;
+      return a && b ? rng.randomValue(1) : mkBool(a);
+    }
+    case LsKind::ULT:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM:
+    case LsKind::SHL:
+    case LsKind::LSHR: Unimplemented() << "inverseValue for " << op.kind;
+    case LsKind::CONST:
+    case LsKind::VAR: break;
+  }
+  Unreachable() << "inverseValue called on leaf kind " << op.kind;
+}
+
+}  // namespace
+
+bool isInvertible(const OpInfo& op,
+                  uint32_t posX,
+                  const LsValue& t,
+                  const std::vector<const LsValue*>& ch)
+{
+  Assert(ch.size() == arity(op.kind));
+  Assert(posX < ch.size());
+  switch (op.kind)
+  {
+    case LsKind::NOT:
+    case LsKind::EQ:
+    case LsKind::ADD:
+    case LsKind::EXTRACT: return true;
+    case LsKind::AND: return (t & *ch[1 - posX]) == t;
+    case LsKind::CONCAT:
+    {
+      // The other child must equal the rest of t.
+      uint32_t w = t.getSize();
+      if (posX == 0)
+      {
+        return *ch[1] == t.extract(ch[1]->getSize() - 1, 0);
+      }
+      return *ch[0] == t.extract(w - 1, ch[1]->getSize());
+    }
+    case LsKind::ITE:
+      if (posX == 0)
+      {
+        return *ch[1] == t || *ch[2] == t;
+      }
+      // The disabled branch is never a propagation path, so it counts as not
+      // invertible.
+      return iteIsEnabled(posX, ch);
+    case LsKind::ULT:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM:
+    case LsKind::SHL:
+    case LsKind::LSHR: Unimplemented() << "isInvertible for " << op.kind;
+    case LsKind::CONST:
+    case LsKind::VAR: break;
+  }
+  Unreachable() << "isInvertible called on leaf kind " << op.kind;
+}
+
+LsValue inverseValue(const OpInfo& op,
+                     uint32_t posX,
+                     const LsValue& t,
+                     const std::vector<const LsValue*>& ch,
+                     LsRng& rng)
+{
+  Assert(isInvertible(op, posX, t, ch));
+  LsValue x = computeInverse(op, posX, t, ch, rng);
+#ifdef CVC5_ASSERTIONS
+  std::vector<const LsValue*> chx = ch;
+  chx[posX] = &x;
+  Assert(evaluate(op, chx) == t) << "inverse value " << x << " for " << op.kind
+                                 << " at " << posX << " does not produce " << t;
+#endif
+  return x;
+}
+
+LsValue consistentValue(const OpInfo& op,
+                        uint32_t posX,
+                        const LsValue& t,
+                        const std::vector<const LsValue*>& ch,
+                        LsRng& rng)
+{
+  Assert(ch.size() == arity(op.kind));
+  Assert(posX < ch.size());
+  uint32_t w = ch[posX]->getSize();
+  switch (op.kind)
+  {
+    case LsKind::NOT: return ~t;
+    case LsKind::AND: return t | rng.randomValue(w);
+    case LsKind::EQ:
+    case LsKind::ADD: return rng.randomValue(w);
+    case LsKind::CONCAT: return concatPartOf(posX, t, ch);
+    case LsKind::EXTRACT: return setSlice(rng.randomValue(w), op.hi, op.lo, t);
+    case LsKind::ITE:
+      // For a branch, t is consistent (with the condition selecting it).
+      return posX == 0 ? rng.randomValue(1) : t;
+    case LsKind::ULT:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM:
+    case LsKind::SHL:
+    case LsKind::LSHR: Unimplemented() << "consistentValue for " << op.kind;
+    case LsKind::CONST:
+    case LsKind::VAR: break;
+  }
+  Unreachable() << "consistentValue called on leaf kind " << op.kind;
 }
 
 }  // namespace ls

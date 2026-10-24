@@ -9,6 +9,7 @@
  * (theory/bv/ls/ls_ops.h).
  */
 
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -21,6 +22,15 @@ namespace cvc5::internal {
 using namespace theory::bv::ls;
 
 namespace test {
+
+/** Exemptions from the completeness checks of checkRules. */
+struct Exempt
+{
+  /** Inverse values need not cover every solution. */
+  bool inverseCoverage = false;
+  /** Consistent values need not cover every consistent value. */
+  bool consistentCoverage = false;
+};
 
 class TestTheoryWhiteBvLsOps : public TestInternal
 {
@@ -54,9 +64,143 @@ class TestTheoryWhiteBvLsOps : public TestInternal
       case LsKind::UREM: return b == 0 ? a : a % b;
       case LsKind::SHL: return b >= w ? 0 : (a << b) & mask;
       case LsKind::LSHR: return b >= w ? 0 : a >> b;
-      default: Unreachable();
+      default: break;
+    }
+    Unreachable();
+  }
+
+  /** Number of samples per soundness check. */
+  static constexpr uint32_t kSamples = 64;
+  /** Number of samples per coverage check. */
+  static constexpr uint32_t kCoverageSamples = 256;
+  /** Maximum width of x for the coverage checks. */
+  static constexpr uint32_t kCoverageWidth = 3;
+
+  /**
+   * Check the rules of op for child posX exhaustively, with the children of
+   * the given widths. For every target value t and every assignment of the
+   * children (including the current value of x), compare isInvertible with a
+   * brute-force search over x, check that inverse values produce t and that
+   * consistent values have some assignment of the other children producing
+   * t. For widths of x up to kCoverageWidth, also check that the sampled
+   * values cover all solutions.
+   */
+  void checkRules(const OpInfo& op,
+                  uint32_t posX,
+                  const std::vector<uint32_t>& widths,
+                  Exempt exempt = {})
+  {
+    uint32_t n = widths.size();
+    uint32_t wx = widths[posX];
+    // All assignments to the children, in mixed radix.
+    std::vector<std::vector<LsValue>> assignments;
+    std::vector<uint32_t> digits(n, 0);
+    while (true)
+    {
+      std::vector<LsValue> vals;
+      for (uint32_t i = 0; i < n; ++i)
+      {
+        vals.emplace_back(widths[i], digits[i]);
+      }
+      assignments.push_back(vals);
+      uint32_t i = 0;
+      while (i < n && ++digits[i] == (1u << widths[i]))
+      {
+        digits[i++] = 0;
+      }
+      if (i == n)
+      {
+        break;
+      }
+    }
+    uint32_t wt = eval(op, assignments[0]).getSize();
+
+    for (uint32_t tv = 0; tv < (1u << wt); ++tv)
+    {
+      LsValue t(wt, tv);
+      // x' is consistent iff some assignment with x = x' produces t.
+      std::set<uint32_t> consistent;
+      for (const std::vector<LsValue>& vals : assignments)
+      {
+        if (eval(op, vals) == t)
+        {
+          consistent.insert(vals[posX].getValue().getUnsignedInt());
+        }
+      }
+
+      for (const std::vector<LsValue>& vals : assignments)
+      {
+        std::vector<const LsValue*> ch;
+        for (const LsValue& v : vals)
+        {
+          ch.push_back(&v);
+        }
+        std::stringstream ctx;
+        ctx << op.kind << "[" << op.hi << ":" << op.lo << "] pos=" << posX
+            << " t=" << t;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+          ctx << " ch" << i << "=" << vals[i];
+        }
+
+        // The solutions x' for the current values of the other children.
+        std::set<uint32_t> solutions;
+        for (uint32_t xv = 0; xv < (1u << wx); ++xv)
+        {
+          std::vector<LsValue> valsx = vals;
+          valsx[posX] = LsValue(wx, xv);
+          if (eval(op, valsx) == t)
+          {
+            solutions.insert(xv);
+          }
+        }
+        bool expectedIc = !solutions.empty();
+        if (op.kind == LsKind::ITE && posX > 0
+            && vals[0].isBitSet(0) != (posX == 1))
+        {
+          // The disabled branch counts as not invertible.
+          expectedIc = false;
+        }
+        ASSERT_EQ(isInvertible(op, posX, t, ch), expectedIc) << ctx.str();
+
+        bool coverage = wx <= kCoverageWidth;
+        if (expectedIc)
+        {
+          std::set<uint32_t> seen;
+          uint32_t samples = coverage ? kCoverageSamples : kSamples;
+          for (uint32_t i = 0; i < samples; ++i)
+          {
+            LsValue x = inverseValue(op, posX, t, ch, d_rng);
+            ASSERT_EQ(x.getSize(), wx) << ctx.str();
+            uint32_t xv = x.getValue().getUnsignedInt();
+            ASSERT_TRUE(solutions.count(xv)) << ctx.str() << " inverse=" << x;
+            seen.insert(xv);
+          }
+          if (coverage && !exempt.inverseCoverage)
+          {
+            ASSERT_EQ(seen, solutions) << ctx.str() << " (inverse coverage)";
+          }
+        }
+
+        std::set<uint32_t> seen;
+        uint32_t samples = coverage ? kCoverageSamples : kSamples;
+        for (uint32_t i = 0; i < samples; ++i)
+        {
+          LsValue x = consistentValue(op, posX, t, ch, d_rng);
+          ASSERT_EQ(x.getSize(), wx) << ctx.str();
+          uint32_t xv = x.getValue().getUnsignedInt();
+          ASSERT_TRUE(consistent.count(xv)) << ctx.str() << " consistent=" << x;
+          seen.insert(xv);
+        }
+        if (coverage && !exempt.consistentCoverage)
+        {
+          ASSERT_EQ(seen, consistent) << ctx.str() << " (consistent coverage)";
+        }
+      }
     }
   }
+
+  LsRng d_rng{42};
 };
 
 TEST_F(TestTheoryWhiteBvLsOps, arity_toString)
@@ -188,6 +332,77 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_wide)
     ASSERT_EQ(cat.extract(2 * w - 1, w), one);
     ASSERT_EQ(eval({LsKind::ITE}, {t, lo64, bit64}), lo64);
     ASSERT_EQ(eval({LsKind::ITE}, {f, lo64, bit64}), bit64);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Invertibility conditions, inverse and consistent values                    */
+/* -------------------------------------------------------------------------- */
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_not)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::NOT}, 0, {w}));
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_and_eq_add)
+{
+  for (LsKind k : {LsKind::AND, LsKind::EQ, LsKind::ADD})
+  {
+    for (uint32_t w = 1; w <= 4; ++w)
+    {
+      for (uint32_t pos = 0; pos <= 1; ++pos)
+      {
+        ASSERT_NO_FATAL_FAILURE(checkRules({k}, pos, {w, w}));
+      }
+    }
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_concat)
+{
+  for (uint32_t w0 = 1; w0 <= 3; ++w0)
+  {
+    for (uint32_t w1 = 1; w1 <= 3; ++w1)
+    {
+      for (uint32_t pos = 0; pos <= 1; ++pos)
+      {
+        ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::CONCAT}, pos, {w0, w1}));
+      }
+    }
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_extract)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t hi = 0; hi < w; ++hi)
+    {
+      for (uint32_t lo = 0; lo <= hi; ++lo)
+      {
+        ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::EXTRACT, hi, lo}, 0, {w}));
+      }
+    }
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_ite)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::ITE}, 0, {1, w, w}));
+    // The consistent value of a branch is always t, as in Bitwuzla, although
+    // any value is consistent (with the condition selecting the other branch).
+    Exempt exempt;
+    exempt.consistentCoverage = true;
+    for (uint32_t pos = 1; pos <= 2; ++pos)
+    {
+      ASSERT_NO_FATAL_FAILURE(
+          checkRules({LsKind::ITE}, pos, {1, w, w}, exempt));
+    }
   }
 }
 
