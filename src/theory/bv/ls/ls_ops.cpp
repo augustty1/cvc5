@@ -131,6 +131,134 @@ bool iteIsEnabled(uint32_t posX, const std::vector<const LsValue*>& ch)
   return ch[0]->isBitSet(0) == (posX == 1);
 }
 
+/*
+ * SHL and LSHR are mirror images: SHL counts trailing zeros, shifts left and
+ * loses the top bits of x, LSHR counts leading zeros, shifts right and loses
+ * the bottom bits. The helpers below take left = true for SHL.
+ */
+
+/** Return x shifted by k <= w bits, to the left if left holds. */
+LsValue shiftBy(const LsValue& x, uint32_t k, bool left)
+{
+  LsValue amount(x.getSize(), k);
+  return left ? x.leftShift(amount) : x.logicalRightShift(amount);
+}
+
+/** Return the number of zeros that a shift in direction left fills in. */
+uint32_t shiftZeros(const LsValue& x, bool left)
+{
+  return left ? ctz(x) : clz(x);
+}
+
+/**
+ * Return x with its k bits that a shift in direction left loses (the top k
+ * if left, the bottom k otherwise) randomized.
+ */
+LsValue randomizeLostBits(const LsValue& x, uint32_t k, bool left, LsRng& rng)
+{
+  if (k == 0)
+  {
+    return x;
+  }
+  uint32_t w = x.getSize();
+  uint32_t lo = left ? w - k : 0;
+  return setSlice(x, lo + k - 1, lo, rng.randomValue(k));
+}
+
+/** IC for x << s = t (left) or x >> s = t (not left), x at position 0. */
+bool icShiftValue(const LsValue& s, const LsValue& t, bool left)
+{
+  uint32_t k = shiftAmount(s, t.getSize());
+  return shiftBy(shiftBy(t, k, !left), k, left) == t;
+}
+
+/** IC for s << x = t (left) or s >> x = t (not left), x at position 1. */
+bool icShiftAmount(const LsValue& s, const LsValue& t, bool left)
+{
+  uint32_t zs = shiftZeros(s, left);
+  uint32_t zt = shiftZeros(t, left);
+  return zs <= zt && (isZero(t) || shiftBy(s, zt - zs, left) == t);
+}
+
+/** Inverse value for a shift, see icShiftValue and icShiftAmount. */
+LsValue invShift(uint32_t posX,
+                 const LsValue& t,
+                 const std::vector<const LsValue*>& ch,
+                 bool left,
+                 LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  if (posX == 0)
+  {
+    // Undo the shift; the bits shifted out are free.
+    uint32_t k = shiftAmount(*ch[1], w);
+    return randomizeLostBits(shiftBy(t, k, !left), k, left, rng);
+  }
+  const LsValue& s = *ch[0];
+  if (isZero(t))
+  {
+    if (isZero(s))
+    {
+      return rng.randomValue(w);
+    }
+    // Every amount that shifts all set bits of s out.
+    return rng.randomInRange(LsValue(w, w - shiftZeros(s, left)),
+                             LsValue::mkOnes(w));
+  }
+  // The amount is unique.
+  return LsValue(w, shiftZeros(t, left) - shiftZeros(s, left));
+}
+
+/** Consistent value for a shift. */
+LsValue consShift(uint32_t posX, const LsValue& t, bool left, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  if (isZero(t))
+  {
+    return rng.randomValue(w);
+  }
+  uint32_t zt = shiftZeros(t, left);
+  if (posX == 0)
+  {
+    // Any amount k <= zt works with x = t shifted back by k.
+    uint32_t k = rng.pickIndex(zt + 1);
+    return randomizeLostBits(shiftBy(t, k, !left), k, left, rng);
+  }
+  return rng.randomInRange(LsValue::mkZero(w), LsValue(w, zt));
+}
+
+/** Inverse value for (x <u s) = t (posX = 0) or (s <u x) = t (posX = 1). */
+LsValue invUlt(uint32_t posX,
+               const LsValue& t,
+               const std::vector<const LsValue*>& ch,
+               LsRng& rng)
+{
+  const LsValue& s = *ch[1 - posX];
+  uint32_t w = s.getSize();
+  LsValue zero = LsValue::mkZero(w);
+  LsValue ones = LsValue::mkOnes(w);
+  bool lt = t.isBitSet(0);
+  if (posX == 0)
+  {
+    return lt ? rng.randomInRange(zero, dec(s)) : rng.randomInRange(s, ones);
+  }
+  return lt ? rng.randomInRange(inc(s), ones) : rng.randomInRange(zero, s);
+}
+
+/** Consistent value for ULT, see invUlt. */
+LsValue consUlt(uint32_t posX, const LsValue& t, uint32_t w, LsRng& rng)
+{
+  if (!t.isBitSet(0))
+  {
+    return rng.randomValue(w);
+  }
+  // x <u s' needs x != ones, s' <u x needs x != 0.
+  LsValue zero = LsValue::mkZero(w);
+  LsValue ones = LsValue::mkOnes(w);
+  return posX == 0 ? rng.randomInRange(zero, dec(ones))
+                   : rng.randomInRange(inc(zero), ones);
+}
+
 /** The inverse value rules, see inverseValue. */
 LsValue computeInverse(const OpInfo& op,
                        uint32_t posX,
@@ -165,12 +293,12 @@ LsValue computeInverse(const OpInfo& op,
       bool b = *ch[2] == t;
       return a && b ? rng.randomValue(1) : mkBool(a);
     }
-    case LsKind::ULT:
+    case LsKind::ULT: return invUlt(posX, t, ch, rng);
+    case LsKind::SHL: return invShift(posX, t, ch, true, rng);
+    case LsKind::LSHR: return invShift(posX, t, ch, false, rng);
     case LsKind::MUL:
     case LsKind::UDIV:
-    case LsKind::UREM:
-    case LsKind::SHL:
-    case LsKind::LSHR: Unimplemented() << "inverseValue for " << op.kind;
+    case LsKind::UREM: Unimplemented() << "inverseValue for " << op.kind;
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -212,11 +340,22 @@ bool isInvertible(const OpInfo& op,
       // invertible.
       return iteIsEnabled(posX, ch);
     case LsKind::ULT:
+      // x <u s needs s != 0 and s <u x needs s != ones to be true.
+      if (!t.isBitSet(0))
+      {
+        return true;
+      }
+      return posX == 0 ? !isZero(*ch[1]) : !isOnes(*ch[0]);
+    case LsKind::SHL:
+    case LsKind::LSHR:
+    {
+      bool left = op.kind == LsKind::SHL;
+      return posX == 0 ? icShiftValue(*ch[1], t, left)
+                       : icShiftAmount(*ch[0], t, left);
+    }
     case LsKind::MUL:
     case LsKind::UDIV:
-    case LsKind::UREM:
-    case LsKind::SHL:
-    case LsKind::LSHR: Unimplemented() << "isInvertible for " << op.kind;
+    case LsKind::UREM: Unimplemented() << "isInvertible for " << op.kind;
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -260,12 +399,12 @@ LsValue consistentValue(const OpInfo& op,
     case LsKind::ITE:
       // For a branch, t is consistent (with the condition selecting it).
       return posX == 0 ? rng.randomValue(1) : t;
-    case LsKind::ULT:
+    case LsKind::ULT: return consUlt(posX, t, w, rng);
+    case LsKind::SHL: return consShift(posX, t, true, rng);
+    case LsKind::LSHR: return consShift(posX, t, false, rng);
     case LsKind::MUL:
     case LsKind::UDIV:
-    case LsKind::UREM:
-    case LsKind::SHL:
-    case LsKind::LSHR: Unimplemented() << "consistentValue for " << op.kind;
+    case LsKind::UREM: Unimplemented() << "consistentValue for " << op.kind;
     case LsKind::CONST:
     case LsKind::VAR: break;
   }

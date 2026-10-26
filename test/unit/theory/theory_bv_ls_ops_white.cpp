@@ -406,5 +406,30 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_ite)
   }
 }
 
+TEST_F(TestTheoryWhiteBvLsOps, rules_ult)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos <= 1; ++pos)
+    {
+      ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::ULT}, pos, {w, w}));
+    }
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_shl_lshr)
+{
+  for (LsKind k : {LsKind::SHL, LsKind::LSHR})
+  {
+    for (uint32_t w = 1; w <= 4; ++w)
+    {
+      for (uint32_t pos = 0; pos <= 1; ++pos)
+      {
+        ASSERT_NO_FATAL_FAILURE(checkRules({k}, pos, {w, w}));
+      }
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
