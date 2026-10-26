@@ -227,6 +227,123 @@ LsValue consShift(uint32_t posX, const LsValue& t, bool left, LsRng& rng)
   return rng.randomInRange(LsValue::mkZero(w), LsValue(w, zt));
 }
 
+/** Inverse value for x * s = t (MUL is commutative). */
+LsValue invMul(const LsValue& s, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  if (isZero(s))
+  {
+    return rng.randomValue(w);
+  }
+  // With s = s' * 2^c and s' odd, x * s' = t / 2^c modulo 2^(w-c): the low
+  // w-c bits of x are determined, the top c bits are free.
+  uint32_t c = ctz(s);
+  LsValue y = shiftBy(t, c, false) * modInverse(shiftBy(s, c, false));
+  return randomizeLostBits(y, c, true, rng);
+}
+
+/** Consistent value for MUL: any x with ctz(x) <= ctz(t). */
+LsValue consMul(const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  LsValue x = rng.randomValue(w);
+  uint32_t zt = ctz(t);
+  if (!isZero(t) && ctz(x) > zt)
+  {
+    uint32_t i = rng.pickIndex(zt + 1);
+    x = setSlice(x, i, i, LsValue::mkOne(1));
+  }
+  return x;
+}
+
+/** IC for x / s = t (posX = 0) or s / x = t (posX = 1). */
+bool icUdiv(uint32_t posX, const LsValue& s, const LsValue& t)
+{
+  if (posX == 0)
+  {
+    return (s * t).unsignedDivTotal(s) == t;
+  }
+  return s.unsignedDivTotal(s.unsignedDivTotal(t)) == t;
+}
+
+/** Inverse value for UDIV, see icUdiv. */
+LsValue invUdiv(uint32_t posX, const LsValue& s, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  LsValue ones = LsValue::mkOnes(w);
+  if (posX == 0)
+  {
+    if (isZero(s))
+    {
+      return rng.randomValue(w);  // t = ones
+    }
+    // x in [s*t, s*(t+1) - 1], capped at ones.
+    LsValue lo = s * t;
+    if (rng.flipCoin())
+    {
+      return lo;
+    }
+    bool capped = isOnes(t) || umulOverflow(s, inc(t));
+    LsValue hi = capped ? ones : dec(s * inc(t));
+    return rng.randomInRange(lo, hi);
+  }
+  if (isOnes(t))
+  {
+    // s / 0 = ones, and s / 1 = ones iff s = ones.
+    LsValue zero = LsValue::mkZero(w);
+    return isOnes(s) ? rng.randomInRange(zero, LsValue::mkOne(w)) : zero;
+  }
+  if (isZero(t))
+  {
+    return rng.randomInRange(inc(s), ones);
+  }
+  return rng.randomInRange(inc(s.unsignedDivTotal(inc(t))),
+                           s.unsignedDivTotal(t));
+}
+
+/** Consistent value for UDIV. */
+LsValue consUdiv(uint32_t posX, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  LsValue zero = LsValue::mkZero(w);
+  LsValue one = LsValue::mkOne(w);
+  LsValue ones = LsValue::mkOnes(w);
+  if (posX == 0)
+  {
+    if (isOnes(t))
+    {
+      return rng.randomValue(w);  // x / 0 = ones
+    }
+    if (isZero(t))
+    {
+      return rng.randomInRange(zero, dec(ones));
+    }
+    if (t == one)
+    {
+      return rng.randomInRange(one, ones);
+    }
+    // x = y*t + o with divisor y and remainder o < y, without overflow.
+    LsValue y = rng.randomInRange(one, ones.unsignedDivTotal(t));
+    LsValue yt = y * t;
+    LsValue maxOffset = dec(y);
+    LsValue room = ones - yt;
+    if (room.unsignedLessThan(maxOffset))
+    {
+      maxOffset = room;
+    }
+    return yt + rng.randomInRange(zero, maxOffset);
+  }
+  if (isOnes(t))
+  {
+    return rng.randomInRange(zero, one);  // s' / 0 or ones / 1
+  }
+  if (isZero(t))
+  {
+    return rng.randomInRange(one, ones);  // 0 / x
+  }
+  return rng.randomInRange(one, ones.unsignedDivTotal(t));  // (x*t) / x
+}
+
 /** Inverse value for (x <u s) = t (posX = 0) or (s <u x) = t (posX = 1). */
 LsValue invUlt(uint32_t posX,
                const LsValue& t,
@@ -296,8 +413,8 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::ULT: return invUlt(posX, t, ch, rng);
     case LsKind::SHL: return invShift(posX, t, ch, true, rng);
     case LsKind::LSHR: return invShift(posX, t, ch, false, rng);
-    case LsKind::MUL:
-    case LsKind::UDIV:
+    case LsKind::MUL: return invMul(*ch[1 - posX], t, rng);
+    case LsKind::UDIV: return invUdiv(posX, *ch[1 - posX], t, rng);
     case LsKind::UREM: Unimplemented() << "inverseValue for " << op.kind;
     case LsKind::CONST:
     case LsKind::VAR: break;
@@ -354,7 +471,9 @@ bool isInvertible(const OpInfo& op,
                        : icShiftAmount(*ch[0], t, left);
     }
     case LsKind::MUL:
-    case LsKind::UDIV:
+      // t = 0, or s != 0 and ctz(s) <= ctz(t) (ctz(0) = w covers both).
+      return ctz(*ch[1 - posX]) <= ctz(t);
+    case LsKind::UDIV: return icUdiv(posX, *ch[1 - posX], t);
     case LsKind::UREM: Unimplemented() << "isInvertible for " << op.kind;
     case LsKind::CONST:
     case LsKind::VAR: break;
@@ -402,8 +521,8 @@ LsValue consistentValue(const OpInfo& op,
     case LsKind::ULT: return consUlt(posX, t, w, rng);
     case LsKind::SHL: return consShift(posX, t, true, rng);
     case LsKind::LSHR: return consShift(posX, t, false, rng);
-    case LsKind::MUL:
-    case LsKind::UDIV:
+    case LsKind::MUL: return consMul(t, rng);
+    case LsKind::UDIV: return consUdiv(posX, t, rng);
     case LsKind::UREM: Unimplemented() << "consistentValue for " << op.kind;
     case LsKind::CONST:
     case LsKind::VAR: break;

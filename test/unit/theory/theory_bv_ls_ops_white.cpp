@@ -431,5 +431,19 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_shl_lshr)
   }
 }
 
+TEST_F(TestTheoryWhiteBvLsOps, rules_mul_udiv)
+{
+  for (LsKind k : {LsKind::MUL, LsKind::UDIV})
+  {
+    for (uint32_t w = 1; w <= 4; ++w)
+    {
+      for (uint32_t pos = 0; pos <= 1; ++pos)
+      {
+        ASSERT_NO_FATAL_FAILURE(checkRules({k}, pos, {w, w}));
+      }
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
