@@ -88,6 +88,18 @@ bool isInvertible(const OpInfo& op,
                   const std::vector<const LsValue*>& ch);
 
 /**
+ * Return true if child i is essential for t (FMSD'17 Def. 13): no other child
+ * can be changed alone to make op evaluate to t, i.e., isInvertible fails for
+ * every other position. The disabled branch of an ITE counts as not
+ * invertible. Trivially true for unary operators. Does not draw random
+ * numbers.
+ */
+bool isEssential(const OpInfo& op,
+                 uint32_t i,
+                 const LsValue& t,
+                 const std::vector<const LsValue*>& ch);
+
+/**
  * Return a random value x' for child posX such that op evaluates to t with
  * the other children fixed. Requires isInvertible(op, posX, t, ch).
  */

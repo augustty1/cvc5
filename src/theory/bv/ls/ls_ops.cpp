@@ -75,6 +75,28 @@ namespace {
 /** Return the width-1 value of b. */
 LsValue mkBool(bool b) { return LsValue(1, static_cast<uint32_t>(b)); }
 
+/*
+ * Probabilities (per mille) of the biased choices inside the rules. All are
+ * Bitwuzla's values; none comes from the papers. They are candidates for
+ * recalibration and will become expert options.
+ */
+/** EXTRACT inverse: keep the current bits outside [hi:lo]. */
+constexpr uint32_t kProbExtractKeep = 500;
+/** UDIV pos 0 inverse: return the smallest solution s * t. */
+constexpr uint32_t kProbUdivLo = 500;
+/** UREM pos 0 consistent: return t instead of a value in [2t+1, ones]. */
+constexpr uint32_t kProbUremConsT = 100;
+/** UREM pos 1 inverse with s = t: return 0 instead of a value > t. */
+constexpr uint32_t kProbUremInvZero = 250;
+/** UREM pos 1 inverse with s > t: return n = s - t itself. */
+constexpr uint32_t kProbUremInvN = 500;
+/** UREM pos 1 inverse with s > t = 0: return 1. */
+constexpr uint32_t kProbUremInvOne = 100;
+/** UREM pos 1 consistent: return 0 instead of a value > t. */
+constexpr uint32_t kProbUremConsZero = 100;
+/** Maximum number of trial divisions when searching a divisor for UREM. */
+constexpr uint32_t kMaxDivisorTrials = 256;
+
 }  // namespace
 
 LsValue evaluate(const OpInfo& op, const std::vector<const LsValue*>& ch)
@@ -279,7 +301,7 @@ LsValue invUdiv(uint32_t posX, const LsValue& s, const LsValue& t, LsRng& rng)
     }
     // x in [s*t, s*(t+1) - 1], capped at ones.
     LsValue lo = s * t;
-    if (rng.flipCoin())
+    if (rng.pickWithProb(kProbUdivLo))
     {
       return lo;
     }
@@ -344,6 +366,118 @@ LsValue consUdiv(uint32_t posX, const LsValue& t, LsRng& rng)
   return rng.randomInRange(one, ones.unsignedDivTotal(t));  // (x*t) / x
 }
 
+/** IC for x mod s = t (posX = 0) or s mod x = t (posX = 1). */
+bool icUrem(uint32_t posX, const LsValue& s, const LsValue& t)
+{
+  if (posX == 0)
+  {
+    // ~(-s) >= t, i.e., s = 0 or t < s.
+    return !(~(-s)).unsignedLessThan(t);
+  }
+  return !((t + t - s) & s).unsignedLessThan(t);
+}
+
+/**
+ * Return a random divisor d > t of n, or n if the bounded trial division
+ * finds none. Requires n > t.
+ */
+LsValue randomDivisorAbove(const LsValue& n, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = n.getSize();
+  const Integer& nv = n.getValue();
+  const Integer& tv = t.getValue();
+  std::vector<Integer> divisors;
+  for (uint32_t i = 1; i <= kMaxDivisorTrials; ++i)
+  {
+    Integer d(i);
+    if (d * d > nv)
+    {
+      break;
+    }
+    if (nv.euclidianDivideRemainder(d).isZero())
+    {
+      Integer q = nv.euclidianDivideQuotient(d);
+      if (d > tv)
+      {
+        divisors.push_back(d);
+      }
+      if (q > tv && q != d)
+      {
+        divisors.push_back(q);
+      }
+    }
+  }
+  if (divisors.empty())
+  {
+    return n;
+  }
+  return LsValue(w, divisors[rng.pickIndex(divisors.size())]);
+}
+
+/** Inverse value for UREM, see icUrem. */
+LsValue invUrem(uint32_t posX, const LsValue& s, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  LsValue zero = LsValue::mkZero(w);
+  LsValue ones = LsValue::mkOnes(w);
+  if (posX == 0)
+  {
+    if (isZero(s))
+    {
+      return t;  // x mod 0 = x
+    }
+    // x = s*n + t for any n that does not overflow.
+    LsValue n = rng.randomInRange(zero, (ones - t).unsignedDivTotal(s));
+    return s * n + t;
+  }
+  if (isOnes(t))
+  {
+    return zero;  // s mod 0 = s = ones
+  }
+  if (s == t)
+  {
+    // s mod 0 = s, and s mod x = s for every x > s.
+    return rng.pickWithProb(kProbUremInvZero) ? zero
+                                              : rng.randomInRange(inc(t), ones);
+  }
+  // s > t: x > t must divide n = s - t.
+  LsValue n = s - t;
+  if (rng.pickWithProb(kProbUremInvN))
+  {
+    return n;
+  }
+  if (isZero(t) && rng.pickWithProb(kProbUremInvOne))
+  {
+    return LsValue::mkOne(w);
+  }
+  return randomDivisorAbove(n, t, rng);
+}
+
+/** Consistent value for UREM. */
+LsValue consUrem(uint32_t posX, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  LsValue zero = LsValue::mkZero(w);
+  LsValue ones = LsValue::mkOnes(w);
+  if (posX == 0)
+  {
+    // The consistent values are t (with s = 0 or s > t) and [2t+1, ones]
+    // (with s = x - t).
+    if (isOnes(t) || uaddOverflow(t, inc(t))
+        || rng.pickWithProb(kProbUremConsT))
+    {
+      return t;
+    }
+    return rng.randomInRange(t + inc(t), ones);
+  }
+  // The consistent values are 0 (with s = t) and [t+1, ones] (with s = t).
+  if (isOnes(t) || rng.pickWithProb(kProbUremConsZero))
+  {
+    return zero;
+  }
+  return rng.randomInRange(inc(t), ones);
+}
+
 /** Inverse value for (x <u s) = t (posX = 0) or (s <u x) = t (posX = 1). */
 LsValue invUlt(uint32_t posX,
                const LsValue& t,
@@ -397,7 +531,8 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::EXTRACT:
     {
       // Keep the bits outside [hi:lo] with probability 1/2.
-      LsValue x = rng.flipCoin() ? *ch[0] : rng.randomValue(w);
+      LsValue x =
+          rng.pickWithProb(kProbExtractKeep) ? *ch[0] : rng.randomValue(w);
       return setSlice(x, op.hi, op.lo, t);
     }
     case LsKind::ITE:
@@ -415,7 +550,7 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::LSHR: return invShift(posX, t, ch, false, rng);
     case LsKind::MUL: return invMul(*ch[1 - posX], t, rng);
     case LsKind::UDIV: return invUdiv(posX, *ch[1 - posX], t, rng);
-    case LsKind::UREM: Unimplemented() << "inverseValue for " << op.kind;
+    case LsKind::UREM: return invUrem(posX, *ch[1 - posX], t, rng);
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -474,11 +609,28 @@ bool isInvertible(const OpInfo& op,
       // t = 0, or s != 0 and ctz(s) <= ctz(t) (ctz(0) = w covers both).
       return ctz(*ch[1 - posX]) <= ctz(t);
     case LsKind::UDIV: return icUdiv(posX, *ch[1 - posX], t);
-    case LsKind::UREM: Unimplemented() << "isInvertible for " << op.kind;
+    case LsKind::UREM: return icUrem(posX, *ch[1 - posX], t);
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
   Unreachable() << "isInvertible called on leaf kind " << op.kind;
+}
+
+bool isEssential(const OpInfo& op,
+                 uint32_t i,
+                 const LsValue& t,
+                 const std::vector<const LsValue*>& ch)
+{
+  Assert(ch.size() == arity(op.kind));
+  Assert(i < ch.size());
+  for (uint32_t j = 0, n = ch.size(); j < n; ++j)
+  {
+    if (j != i && isInvertible(op, j, t, ch))
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 LsValue inverseValue(const OpInfo& op,
@@ -523,7 +675,7 @@ LsValue consistentValue(const OpInfo& op,
     case LsKind::LSHR: return consShift(posX, t, false, rng);
     case LsKind::MUL: return consMul(t, rng);
     case LsKind::UDIV: return consUdiv(posX, t, rng);
-    case LsKind::UREM: Unimplemented() << "consistentValue for " << op.kind;
+    case LsKind::UREM: return consUrem(posX, t, rng);
     case LsKind::CONST:
     case LsKind::VAR: break;
   }

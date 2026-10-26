@@ -445,5 +445,159 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_mul_udiv)
   }
 }
 
+TEST_F(TestTheoryWhiteBvLsOps, rules_urem)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos <= 1; ++pos)
+    {
+      ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::UREM}, pos, {w, w}));
+    }
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, is_essential)
+{
+  // (op, widths of the children) to check, all positions each.
+  std::vector<std::pair<OpInfo, std::vector<uint32_t>>> cases;
+  for (LsKind k : {LsKind::AND,
+                   LsKind::EQ,
+                   LsKind::ULT,
+                   LsKind::ADD,
+                   LsKind::MUL,
+                   LsKind::UDIV,
+                   LsKind::UREM,
+                   LsKind::SHL,
+                   LsKind::LSHR})
+  {
+    for (uint32_t w = 1; w <= 3; ++w)
+    {
+      cases.push_back({{k}, {w, w}});
+    }
+  }
+  cases.push_back({{LsKind::CONCAT}, {1, 2}});
+  cases.push_back({{LsKind::CONCAT}, {2, 1}});
+  cases.push_back({{LsKind::ITE}, {1, 2, 2}});
+
+  for (const auto& [op, widths] : cases)
+  {
+    uint32_t n = widths.size();
+    std::vector<uint32_t> digits(n, 0);
+    while (true)
+    {
+      std::vector<LsValue> vals;
+      for (uint32_t i = 0; i < n; ++i)
+      {
+        vals.emplace_back(widths[i], digits[i]);
+      }
+      std::vector<const LsValue*> ch;
+      for (const LsValue& v : vals)
+      {
+        ch.push_back(&v);
+      }
+      uint32_t wt = eval(op, vals).getSize();
+      for (uint32_t tv = 0; tv < (1u << wt); ++tv)
+      {
+        LsValue t(wt, tv);
+        // canReach[j]: some value of child j alone produces t.
+        std::vector<bool> canReach(n, false);
+        for (uint32_t j = 0; j < n; ++j)
+        {
+          bool disabled = op.kind == LsKind::ITE && j > 0
+                          && vals[0].isBitSet(0) != (j == 1);
+          for (uint32_t xv = 0; !disabled && xv < (1u << widths[j]); ++xv)
+          {
+            std::vector<LsValue> valsx = vals;
+            valsx[j] = LsValue(widths[j], xv);
+            if (eval(op, valsx) == t)
+            {
+              canReach[j] = true;
+              break;
+            }
+          }
+        }
+        for (uint32_t i = 0; i < n; ++i)
+        {
+          bool expected = true;
+          for (uint32_t j = 0; j < n; ++j)
+          {
+            expected = expected && (j == i || !canReach[j]);
+          }
+          ASSERT_EQ(isEssential(op, i, t, ch), expected)
+              << op.kind << " i=" << i << " t=" << t << " ch0=" << vals[0]
+              << " ch1=" << vals[1];
+        }
+      }
+      uint32_t i = 0;
+      while (i < n && ++digits[i] == (1u << widths[i]))
+      {
+        digits[i++] = 0;
+      }
+      if (i == n)
+      {
+        break;
+      }
+    }
+  }
+  // Unary operators: the only input is essential.
+  LsValue x(4, 5u);
+  ASSERT_TRUE(isEssential({LsKind::NOT}, 0, ~x, {&x}));
+  ASSERT_TRUE(isEssential({LsKind::EXTRACT, 2, 1}, 0, LsValue(2, 1u), {&x}));
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_wide)
+{
+  // Widths across 64-bit word boundaries, which the exhaustive tests do not
+  // reach. t is produced from random children, so position posX is
+  // invertible. A consistent value x' is checked through the IC of the other
+  // position: some s' produces t with x' iff it holds.
+  for (uint32_t w : {31u, 32u, 33u, 63u, 64u, 65u, 128u})
+  {
+    for (LsKind k : {LsKind::MUL, LsKind::UDIV, LsKind::UREM})
+    {
+      for (uint32_t pos = 0; pos <= 1; ++pos)
+      {
+        for (uint32_t i = 0; i < 200; ++i)
+        {
+          // Small values make the special cases (0, 1, divisors) likely.
+          auto draw = [&]() {
+            uint32_t r = d_rng.pickIndex(4);
+            if (r == 0) return LsValue(w, d_rng.pickIndex(4));
+            if (r == 1)
+              return LsValue::mkOnes(w) - LsValue(w, d_rng.pickIndex(3));
+            return d_rng.randomValue(w);
+          };
+          LsValue a = draw();
+          LsValue b = draw();
+          std::vector<const LsValue*> ch = {&a, &b};
+          LsValue t = eval({k}, {a, b});
+          std::stringstream ctx;
+          ctx << k << " w=" << w << " pos=" << pos << " a=" << a << " b=" << b;
+          ASSERT_TRUE(isInvertible({k}, pos, t, ch)) << ctx.str();
+          LsValue x = inverseValue({k}, pos, t, ch, d_rng);
+          std::vector<LsValue> vals = {a, b};
+          vals[pos] = x;
+          ASSERT_EQ(eval({k}, vals), t) << ctx.str() << " inverse=" << x;
+
+          // A random target, not necessarily reachable.
+          LsValue t2 = draw();
+          LsValue c = consistentValue({k}, pos, t2, ch, d_rng);
+          std::vector<const LsValue*> chc = ch;
+          chc[pos] = &c;
+          ASSERT_TRUE(isInvertible({k}, 1 - pos, t2, chc))
+              << ctx.str() << " t=" << t2 << " consistent=" << c;
+          if (isInvertible({k}, pos, t2, ch))
+          {
+            LsValue y = inverseValue({k}, pos, t2, ch, d_rng);
+            vals = {a, b};
+            vals[pos] = y;
+            ASSERT_EQ(eval({k}, vals), t2) << ctx.str() << " inverse=" << y;
+          }
+        }
+      }
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
