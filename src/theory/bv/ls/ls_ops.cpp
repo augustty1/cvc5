@@ -76,12 +76,21 @@ namespace {
 LsValue mkBool(bool b) { return LsValue(1, static_cast<uint32_t>(b)); }
 
 /*
- * Probabilities (per mille) of the biased choices inside the rules. All are
- * Bitwuzla's values; none comes from the papers. They are candidates for
- * recalibration and will become expert options.
+ * Probabilities (per mille) of the biased choices inside the rules. Neither
+ * paper specifies them; all are taken from Bitwuzla (src/ls/bv), and all are
+ * candidates for recalibration and will become expert options.
  */
 /** EXTRACT inverse: keep the current bits outside [hi:lo]. */
 constexpr uint32_t kProbExtractKeep = 500;
+/**
+ * EXTRACT inverse, when not keeping: set the bits outside [hi:lo] randomly;
+ * otherwise each of the two outer slices is set to all zeros or all ones.
+ */
+constexpr uint32_t kProbExtractRandom = 500;
+/** MUL consistent with t even and nonzero: return 2^n with n < ctz(t). */
+constexpr uint32_t kProbMulConsPow2 = 100;
+/** MUL consistent with t even and nonzero: return t >> r with r <= ctz(t). */
+constexpr uint32_t kProbMulConsShift = 100;
 /** UDIV pos 0 inverse: return the smallest solution s * t. */
 constexpr uint32_t kProbUdivLo = 500;
 /** UREM pos 0 consistent: return t instead of a value in [2t+1, ones]. */
@@ -268,12 +277,30 @@ LsValue invMul(const LsValue& s, const LsValue& t, LsRng& rng)
 LsValue consMul(const LsValue& t, LsRng& rng)
 {
   uint32_t w = t.getSize();
-  LsValue x = rng.randomValue(w);
-  uint32_t zt = ctz(t);
-  if (!isZero(t) && ctz(x) > zt)
+  if (isZero(t))
   {
-    uint32_t i = rng.pickIndex(zt + 1);
-    x = setSlice(x, i, i, LsValue::mkOne(1));
+    return rng.randomValue(w);
+  }
+  LsValue one = LsValue::mkOne(1);
+  LsValue x = rng.randomInRange(LsValue::mkOne(w), LsValue::mkOnes(w));
+  if (t.isBitSet(0))
+  {
+    return setSlice(x, 0, 0, one);  // t odd: x odd
+  }
+  uint32_t zt = ctz(t);
+  if (rng.pickWithProb(kProbMulConsPow2))
+  {
+    uint32_t n = rng.pickIndex(zt);
+    return setSlice(LsValue::mkZero(w), n, n, one);
+  }
+  if (rng.pickWithProb(kProbMulConsShift))
+  {
+    return t.logicalRightShift(LsValue(w, rng.pickIndex(zt + 1)));
+  }
+  if (ctz(x) > zt)
+  {
+    uint32_t i = rng.pickIndex(zt);
+    x = setSlice(x, i, i, one);
   }
   return x;
 }
@@ -530,9 +557,36 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::CONCAT: return concatPartOf(posX, t, ch);
     case LsKind::EXTRACT:
     {
-      // Keep the bits outside [hi:lo] with probability 1/2.
-      LsValue x =
-          rng.pickWithProb(kProbExtractKeep) ? *ch[0] : rng.randomValue(w);
+      // The bits outside [hi:lo]: keep them, randomize them, or set each
+      // outer slice to all zeros or all ones.
+      LsValue x = *ch[0];
+      if (!rng.pickWithProb(kProbExtractKeep))
+      {
+        if (rng.pickWithProb(kProbExtractRandom))
+        {
+          x = rng.randomValue(w);
+        }
+        else
+        {
+          if (op.hi + 1 < w)
+          {
+            uint32_t size = w - 1 - op.hi;
+            x = setSlice(
+                x,
+                w - 1,
+                op.hi + 1,
+                rng.flipCoin() ? LsValue::mkZero(size) : LsValue::mkOnes(size));
+          }
+          if (op.lo > 0)
+          {
+            x = setSlice(x,
+                         op.lo - 1,
+                         0,
+                         rng.flipCoin() ? LsValue::mkZero(op.lo)
+                                        : LsValue::mkOnes(op.lo));
+          }
+        }
+      }
       return setSlice(x, op.hi, op.lo, t);
     }
     case LsKind::ITE:
