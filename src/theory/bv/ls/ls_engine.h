@@ -39,7 +39,10 @@ enum class LsResult
 /** Counters of the engine, cumulative over all calls to solve. */
 struct LsStats
 {
-  /** Moves made (a leaf received a new value). */
+  /**
+   * Moves made, i.e., leaves that received a new value. A propagation that
+   * ends at a leaf with its current value is not a move (FMSD'17 Sec. 4).
+   */
   uint64_t moves = 0;
   /** Down-propagation steps, including those of moves that end in a conflict.
    */
@@ -161,8 +164,11 @@ class LsEngine
    */
   std::optional<std::pair<uint32_t, bool>> selectPath(
       const Node& n, const LsValue& t, const std::vector<const LsValue*>& ch);
-  /** Set leaf to v and re-evaluate its cone. */
-  void updateCone(uint32_t leaf, const LsValue& v);
+  /**
+   * Set leaf to v and re-evaluate its cone. Return false, and change nothing,
+   * if leaf already has value v.
+   */
+  bool updateCone(uint32_t leaf, const LsValue& v);
 
   LsConfig d_config;
   LsRng d_rng;

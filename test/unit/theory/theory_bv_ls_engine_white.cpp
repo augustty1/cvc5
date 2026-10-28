@@ -155,6 +155,42 @@ TEST_F(TestTheoryWhiteBvLsEngine, example23)
   }
 }
 
+/**
+ * FMSD'17 Example 23 with the structure of the paper: p1 = v + 2,
+ * p2 = v + p1, root p2 = 0, at width 2. The constant forces inverse values at
+ * p1, so the search depends on consistent values at p2.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, example23_paper)
+{
+  for (uint64_t seed = 0; seed < 20; ++seed)
+  {
+    LsEngine e(seed);
+    e.setCheckInvariants(true);
+    uint32_t v = mkVar(e, 2);
+    uint32_t p1 = e.mkOp(LsKind::ADD, {v, mkConst(e, 2, 2)});
+    uint32_t p2 = e.mkOp(LsKind::ADD, {v, p1});
+    e.setRoots({e.mkOp(LsKind::EQ, {p2, mkConst(e, 2, 0)})});
+    ASSERT_EQ(e.solve(10000, 0), LsResult::SAT) << "seed " << seed;
+    uint32_t val = e.value(v).getValue().getUnsignedInt();
+    ASSERT_TRUE(val == 1 || val == 3) << "seed " << seed << " v=" << val;
+    ASSERT_GT(e.stats().propsCons, 0u) << "seed " << seed;
+  }
+}
+
+/** A propagation that ends at the current value of its leaf is no move. */
+TEST_F(TestTheoryWhiteBvLsEngine, noop_moves)
+{
+  // x <u 0 at width 1: the only consistent value for x is 0, its initial
+  // value, so no propagation changes anything.
+  LsEngine e(1);
+  uint32_t x = mkVar(e, 1);
+  e.setRoots({e.mkOp(LsKind::ULT, {x, mkConst(e, 1, 0)})});
+  ASSERT_EQ(e.solve(100, 0), LsResult::UNKNOWN);
+  ASSERT_GE(e.stats().props, 100u);
+  ASSERT_EQ(e.stats().moves, 0u);
+  ASSERT_EQ(e.stats().updates, 0u);
+}
+
 /** x * 3 = 7 needs the inverse value of MUL. */
 TEST_F(TestTheoryWhiteBvLsEngine, mul_odd_constant)
 {

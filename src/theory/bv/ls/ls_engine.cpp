@@ -232,8 +232,10 @@ LsResult LsEngine::solve(uint64_t maxProps,
       ++d_stats.conflicts;
       continue;
     }
-    ++d_stats.moves;
-    updateCone(move->first, move->second);
+    if (updateCone(move->first, move->second))
+    {
+      ++d_stats.moves;
+    }
     if (d_checkInvariants)
     {
       AlwaysAssert(checkInvariants()) << "local search invariant violated";
@@ -324,13 +326,13 @@ std::optional<std::pair<uint32_t, bool>> LsEngine::selectPath(
   return std::make_pair(inputs[d_rng.pickIndex(inputs.size())], false);
 }
 
-void LsEngine::updateCone(uint32_t leaf, const LsValue& v)
+bool LsEngine::updateCone(uint32_t leaf, const LsValue& v)
 {
   Node& l = d_nodes[leaf];
   Assert(l.op.kind == LsKind::VAR);
   if (l.value == v)
   {
-    return;
+    return false;
   }
   l.value = v;
   ++d_stats.updates;
@@ -361,6 +363,7 @@ void LsEngine::updateCone(uint32_t leaf, const LsValue& v)
     updateUnsat(id);
   }
   d_stats.updates += cone.size();
+  return true;
 }
 
 bool LsEngine::checkInvariants() const
