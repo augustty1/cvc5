@@ -164,3 +164,45 @@ name   = "Bitvector Theory"
   default    = "8"
   minimum    = "1"
   help       = "per-term budget of tier-3 value-instantiation refinement lemmas is bit-width/N before falling back to bit-blasting (--bv-abstraction)"
+
+[[option]]
+  name       = "bvLs"
+  category   = "regular"
+  long       = "bv-ls"
+  type       = "bool"
+  default    = "false"
+  help       = "run propagation-based local search (FMSD'17) before bit-blasting, only with --bv-solver=bitblast on pure bit-vector logics; enables --bitblast=eager unless set"
+
+[[option]]
+  name       = "bvLsNprops"
+  category   = "expert"
+  long       = "bv-ls-nprops=N"
+  type       = "uint64_t"
+  default    = "10000"
+  help       = "propagation steps per check of --bv-ls (0 = unlimited)"
+
+[[option]]
+  name       = "bvLsNupdates"
+  category   = "expert"
+  long       = "bv-ls-nupdates=N"
+  type       = "uint64_t"
+  default    = "2000000"
+  help       = "cone updates per check of --bv-ls (0 = unlimited)"
+
+[[option]]
+  name       = "bvLsProbInv"
+  category   = "expert"
+  long       = "bv-ls-prob-inv=N"
+  type       = "uint64_t"
+  default    = "990"
+  maximum    = "1000"
+  help       = "probability (per mille) of using an inverse value over a consistent value in --bv-ls"
+
+[[option]]
+  name       = "bvLsProbEss"
+  category   = "expert"
+  long       = "bv-ls-prob-ess=N"
+  type       = "uint64_t"
+  default    = "990"
+  maximum    = "1000"
+  help       = "probability (per mille) of restricting path selection to essential inputs in --bv-ls"

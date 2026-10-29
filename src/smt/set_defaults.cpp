@@ -429,6 +429,17 @@ void SetDefaults::finalizeLogic(LogicInfo& logic, Options& opts) const
     SET_AND_NOTIFY(quantifiers, sygusInst, true, "logic");
   }
 
+  // Local search (--bv-ls) runs as a pre-solver in eager bit-blasting mode,
+  // where it sees whole assertions. Set it here so that the logic below
+  // enables Ackermannization for eager mode.
+  if (opts.bv.bvLs && !opts.bv.bitblastModeWasSetByUser
+      && logic.isPure(THEORY_BV) && !logic.isQuantified()
+      && opts.bv.bvSolver == options::BVSolver::BITBLAST
+      && !opts.bv.bvAbstraction)
+  {
+    SET_AND_NOTIFY(bv, bitblastMode, options::BitblastMode::EAGER, "bv-ls");
+  }
+
   if (opts.bv.bitblastMode == options::BitblastMode::EAGER)
   {
     if (opts.smt.produceModels
@@ -598,6 +609,34 @@ void SetDefaults::finalizeLogic(LogicInfo& logic, Options& opts) const
 void SetDefaults::setDefaultsPost(const LogicInfo& logic, Options& opts) const
 {
   SET_AND_NOTIFY(smt, produceAssertions, true, "always enabled");
+
+  if (opts.bv.bvLs)
+  {
+    std::string reason;
+    if (!logic.isPure(THEORY_BV) || logic.isQuantified())
+    {
+      reason = "logics other than quantifier-free bit-vectors";
+    }
+    else if (opts.bv.bvSolver != options::BVSolver::BITBLAST)
+    {
+      reason = "bit-vector solvers other than bitblast";
+    }
+    else if (opts.bv.bvAbstraction)
+    {
+      reason = "bv-abstraction";
+    }
+    if (!reason.empty())
+    {
+      if (opts.bv.bvLsWasSetByUser)
+      {
+        std::stringstream ss;
+        ss << "Cannot use --" << options::bv::longName::bvLs << " with "
+           << reason << ".";
+        throw FatalOptionException(ss.str());
+      }
+      SET_AND_NOTIFY(bv, bvLs, false, reason);
+    }
+  }
 
   if (opts.smt.solveBVAsInt != options::SolveBVAsIntMode::OFF)
   {
