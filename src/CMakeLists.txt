@@ -671,6 +671,8 @@ libcvc5_add_sources(
   theory/bv/bv_solver_bitblast_internal.h
   theory/bv/int_blaster.cpp
   theory/bv/int_blaster.h
+  theory/bv/ls/bv_ls_solver.cpp
+  theory/bv/ls/bv_ls_solver.h
   theory/bv/ls/ls_engine.cpp
   theory/bv/ls/ls_engine.h
   theory/bv/ls/ls_ops.cpp
