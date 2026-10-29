@@ -127,7 +127,11 @@ BVSolverBitblast::BVSolverBitblast(Env& env,
                                       : nullptr),
       d_bv(bv),
       d_resetNotify(new NotifyResetAssertions(userContext())),
-      d_isModelConsistent(true)
+      d_isModelConsistent(true),
+      d_ls(options().bv.bvLs ? new ls::BvLsSolver(env) : nullptr),
+      d_lsFacts(context()),
+      d_lsSat(context(), false),
+      d_lsDone(false)
 {
   if (env.isTheoryProofProducing())
   {
@@ -151,6 +155,22 @@ void BVSolverBitblast::postCheck(Theory::Effort level)
     /* Do bit-level propagation only if the SAT solver supports it. */
     if (!d_propagate || !d_satSolver->setPropagateOnly())
     {
+      return;
+    }
+  }
+
+  // Local search pre-solver: at most once per check-sat call, before
+  // bit-blasting. If it finds a model, the facts are satisfied and the
+  // bit-blast queues stay undrained; a later check that falls through drains
+  // them.
+  d_lsSat = false;
+  if (d_ls && level == Theory::Effort::EFFORT_FULL && !d_lsDone)
+  {
+    d_lsDone = true;
+    std::vector<Node> facts(d_lsFacts.begin(), d_lsFacts.end());
+    if (d_ls->check(facts) == prop::SAT_VALUE_TRUE)
+    {
+      d_lsSat = true;
       return;
     }
   }
@@ -281,6 +301,11 @@ bool BVSolverBitblast::preNotifyFact(CVC5_UNUSED TNode atom,
 {
   Valuation& val = d_state.getValuation();
 
+  if (d_ls)
+  {
+    d_lsFacts.push_back(fact);
+  }
+
   /**
    * Check whether `fact` is an input assertion on user-level 0.
    *
@@ -319,6 +344,14 @@ void BVSolverBitblast::computeRelevantTerms(std::set<Node>& termSet)
    */
   if (options().bv.bitblastMode == options::BitblastMode::EAGER)
   {
+    if (d_lsSat.get())
+    {
+      // Local search answered; the bit-blaster may hold stale variables
+      // from earlier calls only.
+      const std::vector<Node>& leaves = d_ls->getLeaves();
+      termSet.insert(leaves.begin(), leaves.end());
+      return;
+    }
     d_bitblaster->computeRelevantTerms(termSet);
   }
 }
@@ -326,6 +359,31 @@ void BVSolverBitblast::computeRelevantTerms(std::set<Node>& termSet)
 bool BVSolverBitblast::collectModelValues(TheoryModel* m,
                                           const std::set<Node>& termSet)
 {
+  if (d_lsSat.get())
+  {
+    // The model is the local search assignment. In eager mode this includes
+    // the Boolean variables of the assertions (the CNF stream is empty).
+    for (const Node& leaf : d_ls->getLeaves())
+    {
+      if (termSet.find(leaf) == termSet.end())
+      {
+        continue;
+      }
+      if (leaf.getType().isBoolean()
+          && options().bv.bitblastMode != options::BitblastMode::EAGER)
+      {
+        continue;  // assigned by the outer SAT solver
+      }
+      Node value = d_ls->getValue(leaf);
+      Assert(value.isConst());
+      if (!m->assertEquality(leaf, value, true))
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
   for (const auto& term : termSet)
   {
     if (!d_bitblaster->isVariable(term))
@@ -389,6 +447,20 @@ Node BVSolverBitblast::getValue(TNode node, bool initialize)
     return node;
   }
 
+  if (d_lsSat.get())
+  {
+    Node value = d_ls->getValue(node);
+    if (!value.isNull())
+    {
+      return value;
+    }
+    // Compound terms are evaluated by TheoryBV from the leaves; leaves that
+    // local search does not know are unconstrained.
+    return initialize && node.getType().isBitVector()
+               ? utils::mkConst(node.getNodeManager(), utils::getSize(node), 0u)
+               : Node();
+  }
+
   if (d_am && d_am->abstractable(node) && d_am->isAbstracted(node))
   {
     node = d_am->getAbstraction(node);
@@ -420,6 +492,8 @@ Node BVSolverBitblast::getValue(TNode node, bool initialize)
   }
   return utils::mkConst(nm, bits.size(), value);
 }
+
+void BVSolverBitblast::presolve() { d_lsDone = false; }
 
 void BVSolverBitblast::handleEagerAtom(TNode fact, bool assertFact)
 {

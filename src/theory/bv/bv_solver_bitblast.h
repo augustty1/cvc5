@@ -15,6 +15,8 @@
 #ifndef CVC5__THEORY__BV__BV_SOLVER_BITBLAST_H
 #define CVC5__THEORY__BV__BV_SOLVER_BITBLAST_H
 
+#include "context/cdlist.h"
+#include "context/cdo.h"
 #include "context/cdqueue.h"
 #include "proof/eager_proof_generator.h"
 #include "prop/cnf_stream.h"
@@ -23,6 +25,7 @@
 #include "theory/bv/abstract/abstraction_module.h"
 #include "theory/bv/bitblast/node_bitblaster.h"
 #include "theory/bv/bv_solver.h"
+#include "theory/bv/ls/bv_ls_solver.h"
 #include "theory/bv/proof_checker.h"
 
 namespace cvc5::internal {
@@ -76,6 +79,9 @@ class BVSolverBitblast : public BVSolver
   Node getValue(TNode node, bool initialize) override;
 
   bool isModelConsistent() const override { return d_isModelConsistent; }
+
+  /** Allow local search to run again in the next check-sat call. */
+  void presolve() override;
 
  private:
   /** Initialize SAT solver and CNF stream.  */
@@ -162,6 +168,15 @@ class BVSolverBitblast : public BVSolver
    * case of abstraction.
    */
   bool d_isModelConsistent;
+
+  /** Local search pre-solver (--bv-ls), null if disabled. */
+  std::unique_ptr<ls::BvLsSolver> d_ls;
+  /** The facts currently asserted, for local search. */
+  context::CDList<Node> d_lsFacts;
+  /** True if local search satisfied the current facts. */
+  context::CDO<bool> d_lsSat;
+  /** True if local search already ran in this check-sat call. */
+  bool d_lsDone;
 };
 
 }  // namespace bv
