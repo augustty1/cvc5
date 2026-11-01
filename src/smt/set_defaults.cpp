@@ -1185,6 +1185,12 @@ bool SetDefaults::incompatibleWithProofs(Options& opts,
     // this is always set by safe options, ok to silently change
     SET_AND_NOTIFY_IF_NOT_USER_VAL_SYM(
         bv, bvSolver, options::BVSolver::BITBLAST_INTERNAL, "proofs");
+    // local search runs only in the bitblast solver; it only answers sat, so
+    // it is ok to silently disable it
+    if (opts.bv.bvSolver != options::BVSolver::BITBLAST)
+    {
+      SET_AND_NOTIFY(bv, bvLs, false, "proofs");
+    }
   }
   if (options().arith.nlCov)
   {
