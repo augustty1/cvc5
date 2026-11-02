@@ -12,6 +12,7 @@
 #include <random>
 #include <vector>
 
+#include "expr/skolem_manager.h"
 #include "test_smt.h"
 #include "theory/bv/ls/bv_ls_solver.h"
 #include "theory/bv/theory_bv_utils.h"
@@ -214,6 +215,39 @@ TEST_F(TestTheoryWhiteBvLsSolver, check_and_model)
 
   // A constant false fact.
   ASSERT_EQ(ls.check({f1, nm->mkConst(false)}), prop::SAT_VALUE_UNKNOWN);
+}
+
+/**
+ * A purification skolem is translated as the term it purifies, and its
+ * definition is not a root.
+ */
+TEST_F(TestTheoryWhiteBvLsSolver, unpurify)
+{
+  BvLsSolver ls(env());
+  NodeManager* nm = d_nodeManager.get();
+  Node x = nm->mkVar("x", nm->mkBitVectorType(8));
+  Node b0 = nm->mkConst(BitVector(1, 0u));
+  Node b1 = nm->mkConst(BitVector(1, 1u));
+  Node cond = mkOp(Kind::EQUAL, {x, nm->mkConst(BitVector(8, 0u))});
+  Node t = mkOp(Kind::ITE, {cond, b1, b0});
+  Node k = SkolemManager::mkPurifySkolem(t);
+  // As term-formula removal leaves it: k = #b1, and k's definition.
+  Node f = mkOp(Kind::EQUAL, {b1, k});
+  Node def =
+      mkOp(Kind::ITE,
+           {cond, mkOp(Kind::EQUAL, {k, b1}), mkOp(Kind::EQUAL, {k, b0})});
+  ASSERT_TRUE(ls.isPurifyDefinition(def));
+  // Not a definition: the branches are swapped.
+  Node swapped =
+      mkOp(Kind::ITE,
+           {cond, mkOp(Kind::EQUAL, {k, b0}), mkOp(Kind::EQUAL, {k, b1})});
+  ASSERT_FALSE(ls.isPurifyDefinition(swapped));
+
+  ASSERT_EQ(ls.check({f, def}), prop::SAT_VALUE_TRUE);
+  ASSERT_EQ(ls.d_nodeMap.at(k), ls.d_nodeMap.at(t));
+  ASSERT_EQ(ls.getValue(x), nm->mkConst(BitVector(8, 0u)));
+  ASSERT_EQ(ls.getValue(k), b1);
+  ASSERT_EQ(ls.getLeaves().size(), 2u);  // k and x
 }
 
 }  // namespace test

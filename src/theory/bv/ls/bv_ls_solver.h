@@ -53,12 +53,17 @@ class BvLsSolver : protected EnvObj
   prop::SatValue check(const std::vector<Node>& facts);
 
   /**
-   * Return the value of n in the last model if n is a leaf (a Boolean or
-   * bit-vector variable) of the local search, and null otherwise.
+   * Return the value of n in the last model if n is one of getLeaves(), and
+   * null otherwise.
    */
   Node getValue(TNode n) const;
 
-  /** Return all leaves of the local search, in creation order. */
+  /**
+   * Return the variables that have a value in the local search model, in
+   * creation order: the leaves (Boolean and bit-vector variables), and the
+   * purification skolems that are translated as the terms they purify (see
+   * option bvLsUnpurify).
+   */
   const std::vector<Node>& getLeaves() const { return d_leaves; }
 
  private:
@@ -75,6 +80,18 @@ class BvLsSolver : protected EnvObj
    * contains an unsupported term.
    */
   bool collectRoots(TNode fact, std::vector<uint32_t>& roots);
+  /**
+   * Return the engine node of the term that the purification skolem k
+   * purifies, if bvLsUnpurify is set, k is such a skolem and the term is
+   * supported. Return nothing otherwise.
+   */
+  std::optional<uint32_t> translateUnpurified(TNode k);
+  /**
+   * Return true if n is the definition ite(c, k = a, k = b) of a purification
+   * skolem k for ite(c, a, b). It holds once k is translated as ite(c, a, b),
+   * so it need not be a root.
+   */
+  bool isPurifyDefinition(TNode n);
   /** Return true if every fact evaluates to true under the leaf values. */
   bool selfCheck(const std::vector<Node>& facts);
 
@@ -99,12 +116,14 @@ class BvLsSolver : protected EnvObj
   std::unordered_map<Node, uint32_t> d_nodeMap;
   /** Constant leaves by (width, value), so equal constants share a node. */
   std::map<std::pair<uint32_t, Integer>, uint32_t> d_consts;
-  /** The leaves, in creation order. */
+  /** See getLeaves(). */
   std::vector<Node> d_leaves;
 
   IntStat d_numChecks;
   IntStat d_numSat;
   IntStat d_numUnsupported;
+  IntStat d_numUnpurified;
+  IntStat d_numPurifyDefs;
   IntStat d_numSelfCheckFailed;
   IntStat d_numMoves;
   IntStat d_numProps;

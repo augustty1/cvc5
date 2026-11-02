@@ -190,6 +190,14 @@ name   = "Bitvector Theory"
   help       = "cone updates per check of --bv-ls (0 = unlimited)"
 
 [[option]]
+  name       = "bvLsUnpurify"
+  category   = "expert"
+  long       = "bv-ls-unpurify"
+  type       = "bool"
+  default    = "true"
+  help       = "in --bv-ls, translate purification skolems (e.g. of ite terms) as the terms they purify, and drop their definitions"
+
+[[option]]
   name       = "bvLsProbInv"
   category   = "expert"
   long       = "bv-ls-prob-inv=N"

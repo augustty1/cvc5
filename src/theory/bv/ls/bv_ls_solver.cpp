@@ -10,6 +10,7 @@
 
 #include "theory/bv/ls/bv_ls_solver.h"
 
+#include "expr/skolem_manager.h"
 #include "options/bv_options.h"
 #include "options/main_options.h"
 #include "theory/bv/theory_bv_utils.h"
@@ -41,6 +42,10 @@ BvLsSolver::BvLsSolver(Env& env)
       d_numSat(statisticsRegistry().registerInt("theory::bv::ls::numSat")),
       d_numUnsupported(
           statisticsRegistry().registerInt("theory::bv::ls::numUnsupported")),
+      d_numUnpurified(
+          statisticsRegistry().registerInt("theory::bv::ls::numUnpurified")),
+      d_numPurifyDefs(
+          statisticsRegistry().registerInt("theory::bv::ls::numPurifyDefs")),
       d_numSelfCheckFailed(statisticsRegistry().registerInt(
           "theory::bv::ls::numSelfCheckFailed")),
       d_numMoves(statisticsRegistry().registerInt("theory::bv::ls::numMoves")),
@@ -194,6 +199,11 @@ bool BvLsSolver::collectRoots(TNode fact, std::vector<uint32_t>& roots)
       }
       continue;
     }
+    if (!neg && isPurifyDefinition(n))
+    {
+      ++d_numPurifyDefs;
+      continue;
+    }
     std::optional<uint32_t> id = translate(n);
     if (!id)
     {
@@ -207,6 +217,60 @@ bool BvLsSolver::collectRoots(TNode fact, std::vector<uint32_t>& roots)
     roots.push_back(root);
   }
   return true;
+}
+
+std::optional<uint32_t> BvLsSolver::translateUnpurified(TNode k)
+{
+  if (!options().bv.bvLsUnpurify || !k.isVar())
+  {
+    return std::nullopt;
+  }
+  Node def = SkolemManager::getUnpurifiedForm(k);
+  if (def == k)
+  {
+    return std::nullopt;
+  }
+  // def may contain other purification skolems, but not k, so this
+  // recursion terminates.
+  return translate(def);
+}
+
+bool BvLsSolver::isPurifyDefinition(TNode n)
+{
+  if (!options().bv.bvLsUnpurify || n.getKind() != Kind::ITE
+      || n[1].getKind() != Kind::EQUAL || n[2].getKind() != Kind::EQUAL)
+  {
+    return false;
+  }
+  // Compare engine nodes rather than terms: the definition was rewritten
+  // after purification, and its condition may mention purification skolems
+  // where def mentions the terms they purify.
+  auto same = [this](TNode x, TNode y) {
+    std::optional<uint32_t> ix = translate(x);
+    return ix && ix == translate(y);
+  };
+  for (uint32_t i = 0; i < 2; ++i)
+  {
+    TNode k = n[1][i];
+    Node def = SkolemManager::getUnpurifiedForm(k);
+    if (def == k || def.getKind() != Kind::ITE || !same(k, def))
+    {
+      continue;
+    }
+    TNode a = n[1][1 - i];
+    uint32_t j = n[2][0] == k ? 1 : 0;
+    if (n[2][1 - j] != k)
+    {
+      continue;
+    }
+    TNode b = n[2][j];
+    // n is ite(c, k = a, k = b) with k translated as ite(c, a, b).
+    if (same(n[0], def[0]) && same(a, def[1]) && same(b, def[2]))
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::optional<uint32_t> BvLsSolver::translate(TNode n)
@@ -264,6 +328,11 @@ std::optional<uint32_t> BvLsSolver::translateOne(TNode n)
   if (n.isVar())
   {
     d_leaves.push_back(n);
+    if (std::optional<uint32_t> id = translateUnpurified(n))
+    {
+      ++d_numUnpurified;
+      return id;
+    }
     return d_engine.mkLeaf(w, std::nullopt);
   }
 
