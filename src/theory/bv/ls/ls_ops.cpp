@@ -73,7 +73,7 @@ uint32_t arity(LsKind k)
 namespace {
 
 /** Return the width-1 value of b. */
-LsValue mkBool(bool b) { return LsValue(1, static_cast<uint32_t>(b)); }
+LsValue mkBool(bool b) { return LsValue(1, b ? 1 : 0); }
 
 /*
  * Probabilities (per mille) of the biased choices inside the rules. Neither
@@ -171,8 +171,7 @@ bool iteIsEnabled(uint32_t posX, const std::vector<const LsValue*>& ch)
 /** Return x shifted by k <= w bits, to the left if left holds. */
 LsValue shiftBy(const LsValue& x, uint32_t k, bool left)
 {
-  LsValue amount(x.getSize(), k);
-  return left ? x.leftShift(amount) : x.logicalRightShift(amount);
+  return left ? x.leftShift(k) : x.logicalRightShift(k);
 }
 
 /** Return the number of zeros that a shift in direction left fills in. */
@@ -295,7 +294,7 @@ LsValue consMul(const LsValue& t, LsRng& rng)
   }
   if (rng.pickWithProb(kProbMulConsShift))
   {
-    return t.logicalRightShift(LsValue(w, rng.pickIndex(zt + 1)));
+    return t.logicalRightShift(rng.pickIndex(zt + 1));
   }
   if (ctz(x) > zt)
   {
@@ -404,43 +403,6 @@ bool icUrem(uint32_t posX, const LsValue& s, const LsValue& t)
   return !((t + t - s) & s).unsignedLessThan(t);
 }
 
-/**
- * Return a random divisor d > t of n, or n if the bounded trial division
- * finds none. Requires n > t.
- */
-LsValue randomDivisorAbove(const LsValue& n, const LsValue& t, LsRng& rng)
-{
-  uint32_t w = n.getSize();
-  const Integer& nv = n.getValue();
-  const Integer& tv = t.getValue();
-  std::vector<Integer> divisors;
-  for (uint32_t i = 1; i <= kMaxDivisorTrials; ++i)
-  {
-    Integer d(i);
-    if (d * d > nv)
-    {
-      break;
-    }
-    if (nv.euclidianDivideRemainder(d).isZero())
-    {
-      Integer q = nv.euclidianDivideQuotient(d);
-      if (d > tv)
-      {
-        divisors.push_back(d);
-      }
-      if (q > tv && q != d)
-      {
-        divisors.push_back(q);
-      }
-    }
-  }
-  if (divisors.empty())
-  {
-    return n;
-  }
-  return LsValue(w, divisors[rng.pickIndex(divisors.size())]);
-}
-
 /** Inverse value for UREM, see icUrem. */
 LsValue invUrem(uint32_t posX, const LsValue& s, const LsValue& t, LsRng& rng)
 {
@@ -477,7 +439,7 @@ LsValue invUrem(uint32_t posX, const LsValue& s, const LsValue& t, LsRng& rng)
   {
     return LsValue::mkOne(w);
   }
-  return randomDivisorAbove(n, t, rng);
+  return randomDivisorAbove(n, t, rng, kMaxDivisorTrials);
 }
 
 /** Consistent value for UREM. */

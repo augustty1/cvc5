@@ -124,7 +124,7 @@ class TestTheoryWhiteBvLsOps : public TestInternal
       {
         if (eval(op, vals) == t)
         {
-          consistent.insert(vals[posX].getValue().getUnsignedInt());
+          consistent.insert(vals[posX].toInteger().getUnsignedInt());
         }
       }
 
@@ -172,7 +172,7 @@ class TestTheoryWhiteBvLsOps : public TestInternal
           {
             LsValue x = inverseValue(op, posX, t, ch, d_rng);
             ASSERT_EQ(x.getSize(), wx) << ctx.str();
-            uint32_t xv = x.getValue().getUnsignedInt();
+            uint32_t xv = x.toInteger().getUnsignedInt();
             ASSERT_TRUE(solutions.count(xv)) << ctx.str() << " inverse=" << x;
             seen.insert(xv);
           }
@@ -188,7 +188,7 @@ class TestTheoryWhiteBvLsOps : public TestInternal
         {
           LsValue x = consistentValue(op, posX, t, ch, d_rng);
           ASSERT_EQ(x.getSize(), wx) << ctx.str();
-          uint32_t xv = x.getValue().getUnsignedInt();
+          uint32_t xv = x.toInteger().getUnsignedInt();
           ASSERT_TRUE(consistent.count(xv)) << ctx.str() << " consistent=" << x;
           seen.insert(xv);
         }

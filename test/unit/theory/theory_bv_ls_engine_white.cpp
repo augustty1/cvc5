@@ -149,7 +149,7 @@ TEST_F(TestTheoryWhiteBvLsEngine, example23)
     uint32_t root = e.mkOp(LsKind::EQ, {sum, mkConst(e, 4, 0)});
     e.setRoots({root});
     ASSERT_EQ(e.solve(10000, 0), LsResult::SAT) << "seed " << seed;
-    uint32_t val = e.value(v).getValue().getUnsignedInt();
+    uint32_t val = e.value(v).toInteger().getUnsignedInt();
     ASSERT_TRUE(val == 7 || val == 15) << "seed " << seed << " v=" << val;
     ASSERT_GT(e.stats().propsCons, 0u) << "seed " << seed;
   }
@@ -171,7 +171,7 @@ TEST_F(TestTheoryWhiteBvLsEngine, example23_paper)
     uint32_t p2 = e.mkOp(LsKind::ADD, {v, p1});
     e.setRoots({e.mkOp(LsKind::EQ, {p2, mkConst(e, 2, 0)})});
     ASSERT_EQ(e.solve(10000, 0), LsResult::SAT) << "seed " << seed;
-    uint32_t val = e.value(v).getValue().getUnsignedInt();
+    uint32_t val = e.value(v).toInteger().getUnsignedInt();
     ASSERT_TRUE(val == 1 || val == 3) << "seed " << seed << " v=" << val;
     ASSERT_GT(e.stats().propsCons, 0u) << "seed " << seed;
   }
@@ -222,8 +222,8 @@ TEST_F(TestTheoryWhiteBvLsEngine, factorization)
          e.mkOp(LsKind::ULT, {x, mkConst(e, 8, 36)}),
          e.mkOp(LsKind::ULT, {y, mkConst(e, 8, 36)})});
     ASSERT_EQ(e.solve(0, 0), LsResult::SAT) << "seed " << seed;
-    uint32_t xv = e.value(x).getValue().getUnsignedInt();
-    uint32_t yv = e.value(y).getValue().getUnsignedInt();
+    uint32_t xv = e.value(x).toInteger().getUnsignedInt();
+    uint32_t yv = e.value(y).toInteger().getUnsignedInt();
     ASSERT_TRUE((xv == 5 && yv == 7) || (xv == 7 && yv == 5))
         << "seed " << seed << " x=" << xv << " y=" << yv;
   }

@@ -9,6 +9,8 @@
  * (theory/bv/ls/ls_value.h).
  */
 
+#include <algorithm>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -182,7 +184,7 @@ TEST_F(TestTheoryWhiteBvLsValue, value_overflow_modInverse_exhaustive)
       {
         LsValue inv = modInverse(x);
         ASSERT_EQ(inv.getSize(), w);
-        ASSERT_EQ((a * inv.getValue().getUnsignedInt()) & ones, 1u)
+        ASSERT_EQ((a * inv.toInteger().getUnsignedInt()) & ones, 1u)
             << "w=" << w << " a=" << a;
       }
     }
@@ -287,6 +289,372 @@ TEST_F(TestTheoryWhiteBvLsValue, value_overflow_modInverse_setSlice_shift_wide)
     ASSERT_EQ(shiftAmount(LsValue(w, w), w), w);
     ASSERT_EQ(shiftAmount(ones, w), w);
     ASSERT_EQ(shiftAmount(msbOnly, w), w);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* LsValue against BitVector                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Check every operation of LsValue on a and b, which have the same width,
+ * against the same operation of BitVector.
+ */
+static void checkAgainstBitVector(const BitVector& a, const BitVector& b)
+{
+  uint32_t w = a.getSize();
+  LsValue x(a), y(b);
+  std::string info =
+      "w=" + std::to_string(w) + " a=" + a.toString() + " b=" + b.toString();
+
+  // Conversions.
+  ASSERT_EQ(x.getSize(), w) << info;
+  ASSERT_EQ(x.toBitVector(), a) << info;
+  ASSERT_EQ(x.toInteger(), a.getValue()) << info;
+  ASSERT_EQ(x.toString(), a.toString()) << info;
+  ASSERT_EQ(x.toString(16), a.toString(16)) << info;
+  ASSERT_EQ(LsValue(w, a.getValue()), x) << info;
+  ASSERT_EQ(LsValue(BitVector(a)), x) << info;
+
+  // Comparisons.
+  ASSERT_EQ(x == y, a == b) << info;
+  ASSERT_EQ(x != y, a != b) << info;
+  ASSERT_EQ(x.unsignedLessThan(y), a.unsignedLessThan(b)) << info;
+  ASSERT_EQ(x.unsignedLessThanEq(y), a.unsignedLessThanEq(b)) << info;
+
+  // Bitwise and arithmetic operations.
+  ASSERT_EQ((~x).toBitVector(), ~a) << info;
+  ASSERT_EQ((x & y).toBitVector(), a & b) << info;
+  ASSERT_EQ((x | y).toBitVector(), a | b) << info;
+  ASSERT_EQ((x ^ y).toBitVector(), a ^ b) << info;
+  ASSERT_EQ((x + y).toBitVector(), a + b) << info;
+  ASSERT_EQ((x - y).toBitVector(), a - b) << info;
+  ASSERT_EQ((-x).toBitVector(), -a) << info;
+  ASSERT_EQ((x * y).toBitVector(), a * b) << info;
+  ASSERT_EQ(x.unsignedDivTotal(y).toBitVector(), a.unsignedDivTotal(b)) << info;
+  ASSERT_EQ(x.unsignedRemTotal(y).toBitVector(), a.unsignedRemTotal(b)) << info;
+
+  // Shifts by a value and by an integer.
+  ASSERT_EQ(x.leftShift(y).toBitVector(), a.leftShift(b)) << info;
+  ASSERT_EQ(x.logicalRightShift(y).toBitVector(), a.logicalRightShift(b))
+      << info;
+  for (uint32_t k : {0u, 1u, w / 2, w - 1, w, w + 1, 2 * w + 3})
+  {
+    // An amount of w or more gives 0, like the amount w.
+    BitVector amount(w + 1, std::min(k, w));
+    BitVector wide = a.zeroExtend(1);
+    ASSERT_EQ(x.leftShift(k).toBitVector(),
+              wide.leftShift(amount).extract(w - 1, 0))
+        << info << " k=" << k;
+    ASSERT_EQ(x.logicalRightShift(k).toBitVector(),
+              wide.logicalRightShift(amount).extract(w - 1, 0))
+        << info << " k=" << k;
+  }
+  ASSERT_EQ(shiftAmount(x, w),
+            a.getValue() >= Integer(w) ? w : a.getValue().getUnsignedInt())
+      << info;
+
+  // Bits.
+  for (uint32_t i : {0u, w / 2, w - 1})
+  {
+    ASSERT_EQ(x.isBitSet(i), a.isBitSet(i)) << info << " i=" << i;
+  }
+
+  // The helpers, against their definitions on Integer.
+  const Integer& av = a.getValue();
+  Integer pow = Integer(2).pow(w);
+  ASSERT_EQ(isZero(x), av.isZero()) << info;
+  ASSERT_EQ(isOnes(x), av + 1 == pow) << info;
+  ASSERT_EQ(msb(x), a.isBitSet(w - 1)) << info;
+  uint32_t tz = 0, lz = 0;
+  while (tz < w && !a.isBitSet(tz))
+  {
+    ++tz;
+  }
+  while (lz < w && !a.isBitSet(w - 1 - lz))
+  {
+    ++lz;
+  }
+  ASSERT_EQ(ctz(x), tz) << info;
+  ASSERT_EQ(clz(x), lz) << info;
+  ASSERT_EQ(inc(x).toBitVector(), a + BitVector::mkOne(w)) << info;
+  ASSERT_EQ(dec(x).toBitVector(), a - BitVector::mkOne(w)) << info;
+  ASSERT_EQ(uaddOverflow(x, y), av + b.getValue() >= pow) << info;
+  ASSERT_EQ(umulOverflow(x, y), av * b.getValue() >= pow) << info;
+  if (a.isBitSet(0))
+  {
+    ASSERT_EQ((x * modInverse(x)).toBitVector(), BitVector::mkOne(w)) << info;
+  }
+}
+
+/** Check extract, setSlice and concat on a and b, of any widths. */
+static void checkSlicesAgainstBitVector(const BitVector& a,
+                                        const BitVector& b,
+                                        uint32_t hi,
+                                        uint32_t lo)
+{
+  uint32_t w = a.getSize();
+  LsValue x(a), y(b);
+  std::string info = "a=" + a.toString() + " b=" + b.toString() + " hi="
+                     + std::to_string(hi) + " lo=" + std::to_string(lo);
+  ASSERT_EQ(x.concat(y).toBitVector(), a.concat(b)) << info;
+  ASSERT_EQ(y.concat(x).toBitVector(), b.concat(a)) << info;
+  ASSERT_EQ(x.extract(hi, lo).toBitVector(), a.extract(hi, lo)) << info;
+  // setSlice with the low bits of b, zero-extended if b is too short.
+  uint32_t size = hi - lo + 1;
+  BitVector v = b.zeroExtend(size).extract(size - 1, 0);
+  BitVector expected = v;
+  if (lo > 0)
+  {
+    expected = expected.concat(a.extract(lo - 1, 0));
+  }
+  if (hi + 1 < w)
+  {
+    expected = a.extract(w - 1, hi + 1).concat(expected);
+  }
+  ASSERT_EQ(setSlice(x, hi, lo, LsValue(v)).toBitVector(), expected) << info;
+}
+
+/** Return a value of width w, often one of the special values. */
+static BitVector mkTestValue(uint32_t w, std::mt19937_64& gen)
+{
+  switch (gen() % 8)
+  {
+    case 0: return BitVector::mkZero(w);
+    case 1: return BitVector::mkOne(w);
+    case 2: return BitVector::mkOnes(w);
+    case 3: return BitVector::mkMinSigned(w);
+    case 4: return BitVector::mkMaxSigned(w);
+    case 5: return BitVector(w, static_cast<uint32_t>(gen() % (2 * w + 2)));
+    default: break;
+  }
+  Integer v(0);
+  for (uint32_t i = 0; i < w; i += 64)
+  {
+    v = v.multiplyByPow2(64) + Integer(static_cast<uint64_t>(gen()));
+  }
+  return BitVector(w, v);
+}
+
+/** All pairs of values of the small widths. */
+TEST_F(TestTheoryWhiteBvLsValue, bitvector_ops_exhaustive)
+{
+  for (uint32_t w = 1; w <= 5; ++w)
+  {
+    for (uint32_t a = 0; a < (1u << w); ++a)
+    {
+      for (uint32_t b = 0; b < (1u << w); ++b)
+      {
+        checkAgainstBitVector(BitVector(w, a), BitVector(w, b));
+        if (HasFatalFailure())
+        {
+          return;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Random and special values at the widths around the machine word sizes,
+ * where a value changes from the native to the wide representation.
+ */
+TEST_F(TestTheoryWhiteBvLsValue, bitvector_ops_random)
+{
+  std::mt19937_64 gen(31);
+  std::vector<uint32_t> widths = {
+      1, 2, 7, 8, 16, 31, 32, 33, 62, 63, 64, 65, 66, 127, 128, 129, 200};
+  for (uint32_t w : widths)
+  {
+    for (uint32_t i = 0; i < 400; ++i)
+    {
+      checkAgainstBitVector(mkTestValue(w, gen), mkTestValue(w, gen));
+      if (HasFatalFailure())
+      {
+        return;
+      }
+    }
+  }
+}
+
+/** Slices and concatenations that stay in, cross and leave 64 bits. */
+TEST_F(TestTheoryWhiteBvLsValue, bitvector_slices)
+{
+  std::mt19937_64 gen(37);
+  // Exhaustive for small widths.
+  for (uint32_t wa = 1; wa <= 4; ++wa)
+  {
+    for (uint32_t wb = 1; wb <= 3; ++wb)
+    {
+      for (uint32_t a = 0; a < (1u << wa); ++a)
+      {
+        for (uint32_t b = 0; b < (1u << wb); ++b)
+        {
+          for (uint32_t hi = 0; hi < wa; ++hi)
+          {
+            for (uint32_t lo = 0; lo <= hi; ++lo)
+            {
+              checkSlicesAgainstBitVector(
+                  BitVector(wa, a), BitVector(wb, b), hi, lo);
+              if (HasFatalFailure())
+              {
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  std::vector<uint32_t> widths = {1, 2, 31, 32, 33, 63, 64, 65, 100, 128, 130};
+  for (uint32_t wa : widths)
+  {
+    for (uint32_t wb : widths)
+    {
+      for (uint32_t i = 0; i < 40; ++i)
+      {
+        uint32_t hi, lo;
+        switch (i % 4)
+        {
+          case 0: hi = wa - 1, lo = 0; break;
+          case 1: hi = lo = gen() % wa; break;
+          case 2: hi = wa - 1, lo = gen() % wa; break;
+          default:
+            hi = gen() % wa;
+            lo = gen() % (hi + 1);
+            break;
+        }
+        checkSlicesAgainstBitVector(
+            mkTestValue(wa, gen), mkTestValue(wb, gen), hi, lo);
+        if (HasFatalFailure())
+        {
+          return;
+        }
+      }
+    }
+  }
+}
+
+/** Copies, moves and assignments between native and wide values. */
+TEST_F(TestTheoryWhiteBvLsValue, value_copy_move_assign)
+{
+  std::mt19937_64 gen(41);
+  ASSERT_EQ(LsValue().getSize(), 0u);
+  for (uint32_t wa : {1u, 8u, 64u, 65u, 200u})
+  {
+    for (uint32_t wb : {1u, 8u, 64u, 65u, 200u})
+    {
+      BitVector a = mkTestValue(wa, gen);
+      BitVector b = mkTestValue(wb, gen);
+      LsValue x(a);
+      LsValue y(b);
+
+      LsValue copy(x);
+      ASSERT_EQ(copy.toBitVector(), a);
+      ASSERT_EQ(x.toBitVector(), a);
+
+      copy = y;  // every combination of native and wide
+      ASSERT_EQ(copy.toBitVector(), b);
+      ASSERT_EQ(y.toBitVector(), b);
+      LsValue& self = copy;
+      copy = self;
+      ASSERT_EQ(copy.toBitVector(), b);
+
+      LsValue moved(std::move(copy));
+      ASSERT_EQ(moved.toBitVector(), b);
+      LsValue target(x);
+      target = std::move(moved);
+      ASSERT_EQ(target.toBitVector(), b);
+      target = LsValue(a);
+      ASSERT_EQ(target.toBitVector(), a);
+
+      // A moved-from value can be assigned again.
+      moved = x;
+      ASSERT_EQ(moved.toBitVector(), a);
+    }
+  }
+  // Values in a vector that grows.
+  std::vector<LsValue> values;
+  std::vector<BitVector> expected;
+  for (uint32_t i = 0; i < 100; ++i)
+  {
+    expected.push_back(mkTestValue(i % 2 == 0 ? 60 + i % 10 : 3, gen));
+    values.push_back(LsValue(expected.back()));
+  }
+  for (uint32_t i = 0; i < 100; ++i)
+  {
+    ASSERT_EQ(values[i].toBitVector(), expected[i]);
+  }
+}
+
+/** The constructors reduce the value modulo 2^w. */
+TEST_F(TestTheoryWhiteBvLsValue, value_constructors)
+{
+  for (uint32_t w : {1u, 5u, 32u, 63u, 64u, 65u, 128u})
+  {
+    uint64_t v = 0xfedcba9876543210ull;
+    ASSERT_EQ(LsValue(w, v).toBitVector(), BitVector(w, v)) << "w=" << w;
+    ASSERT_EQ(LsValue(w, 7u).toBitVector(), BitVector(w, 7u)) << "w=" << w;
+    Integer big = Integer(3).pow(150);
+    ASSERT_EQ(LsValue(w, big).toBitVector(), BitVector(w, big)) << "w=" << w;
+    ASSERT_EQ(LsValue(w, -big).toBitVector(), BitVector(w, -big)) << "w=" << w;
+    ASSERT_EQ(LsValue::mkZero(w).toBitVector(), BitVector::mkZero(w));
+    ASSERT_EQ(LsValue::mkOne(w).toBitVector(), BitVector::mkOne(w));
+    ASSERT_EQ(LsValue::mkOnes(w).toBitVector(), BitVector::mkOnes(w));
+    ASSERT_EQ(LsValue::mkMinSigned(w).toBitVector(), BitVector::mkMinSigned(w));
+    ASSERT_EQ(LsValue::mkMaxSigned(w).toBitVector(), BitVector::mkMaxSigned(w));
+  }
+}
+
+/**
+ * randomDivisorAbove returns a divisor of n greater than t, or n itself.
+ * With enough trials it reaches every such divisor of a small n.
+ */
+TEST_F(TestTheoryWhiteBvLsValue, value_randomDivisorAbove)
+{
+  LsRng rng(43);
+  for (uint32_t w = 1; w <= 6; ++w)
+  {
+    for (uint32_t n = 1; n < (1u << w); ++n)
+    {
+      for (uint32_t t = 0; t < n; ++t)
+      {
+        std::set<uint32_t> expected, seen;
+        for (uint32_t d = t + 1; d <= n; ++d)
+        {
+          if (n % d == 0)
+          {
+            expected.insert(d);
+          }
+        }
+        // n has at most 12 divisors, so 300 draws miss one with a
+        // probability below 1e-10.
+        for (uint32_t i = 0; i < 300; ++i)
+        {
+          LsValue d =
+              randomDivisorAbove(LsValue(w, n), LsValue(w, t), rng, 256);
+          ASSERT_EQ(d.getSize(), w);
+          seen.insert(d.toInteger().getUnsignedInt());
+        }
+        ASSERT_EQ(seen, expected) << "w=" << w << " n=" << n << " t=" << t;
+      }
+    }
+  }
+  // Large values: 2^k * 3 has the divisors 2^i and 3 * 2^i; a prime above the
+  // trial bound has only itself.
+  for (uint32_t w : {64u, 65u, 128u})
+  {
+    LsValue n(w, Integer(2).pow(w - 2) * Integer(3));
+    LsValue t(w, 1000u);
+    for (uint32_t i = 0; i < 50; ++i)
+    {
+      LsValue d = randomDivisorAbove(n, t, rng, 256);
+      ASSERT_TRUE(t.unsignedLessThan(d));
+      ASSERT_TRUE(isZero(n.unsignedRemTotal(d))) << "w=" << w << " d=" << d;
+    }
+    LsValue prime(w, 1000003u);
+    ASSERT_EQ(randomDivisorAbove(prime, t, rng, 256), prime);
+    ASSERT_EQ(randomDivisorAbove(prime, t, rng, 1), prime);
   }
 }
 
@@ -427,8 +795,8 @@ TEST_F(TestTheoryWhiteBvLsValue, rng_randomValue_exhaustive)
     {
       LsValue v = rng.randomValue(w);
       ASSERT_EQ(v.getSize(), w);
-      ASSERT_TRUE(v.getValue() < Integer(size));
-      ++count[v.getValue().getUnsignedInt()];
+      ASSERT_TRUE(v.toInteger() < Integer(size));
+      ++count[v.toInteger().getUnsignedInt()];
     }
     for (uint32_t k = 0; k < size; ++k)
     {
@@ -455,7 +823,7 @@ TEST_F(TestTheoryWhiteBvLsValue, rng_randomValue_wide)
     {
       LsValue v = rng.randomValue(w);
       ASSERT_EQ(v.getSize(), w);
-      ASSERT_TRUE(v.getValue() < bound);
+      ASSERT_TRUE(v.toInteger() < bound);
       for (uint32_t b = 0; b < w; ++b)
       {
         ones[b] += v.isBitSet(b);
@@ -490,7 +858,7 @@ TEST_F(TestTheoryWhiteBvLsValue, rng_randomInRange_exhaustive)
         {
           LsValue r = rng.randomInRange(vlo, vhi);
           ASSERT_EQ(r.getSize(), w);
-          uint32_t v = r.getValue().getUnsignedInt();
+          uint32_t v = r.toInteger().getUnsignedInt();
           ASSERT_GE(v, lo) << "w=" << w << " lo=" << lo << " hi=" << hi;
           ASSERT_LE(v, hi) << "w=" << w << " lo=" << lo << " hi=" << hi;
           seen.insert(v);
@@ -511,7 +879,7 @@ TEST_F(TestTheoryWhiteBvLsValue, rng_randomInRange_uniform)
   std::vector<uint32_t> count(10, 0);
   for (uint32_t i = 0; i < 10000; ++i)
   {
-    ++count[rng.randomInRange(lo, hi).getValue().getUnsignedInt() - 3];
+    ++count[rng.randomInRange(lo, hi).toInteger().getUnsignedInt() - 3];
   }
   for (uint32_t k = 0; k < 10; ++k)
   {
@@ -586,7 +954,7 @@ TEST_F(TestTheoryWhiteBvLsValue, rng_randomNotEqual_exhaustive)
         LsValue r = rng.randomNotEqual(vs);
         ASSERT_EQ(r.getSize(), w);
         ASSERT_NE(r, vs) << "w=" << w << " s=" << s;
-        seen.insert(r.getValue().getUnsignedInt());
+        seen.insert(r.toInteger().getUnsignedInt());
       }
       ASSERT_EQ(seen.size(), ones) << "w=" << w << " s=" << s;
     }

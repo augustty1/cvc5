@@ -78,7 +78,7 @@ class TestTheoryWhiteBvLsSolver : public TestSmt
     }
     else
     {
-      ASSERT_EQ(v, expected.getConst<BitVector>()) << term;
+      ASSERT_EQ(v.toBitVector(), expected.getConst<BitVector>()) << term;
     }
   }
 

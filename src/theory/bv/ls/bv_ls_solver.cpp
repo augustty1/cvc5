@@ -140,7 +140,7 @@ Node BvLsSolver::getValue(TNode n) const
   {
     return nm->mkConst(v.isBitSet(0));
   }
-  return nm->mkConst(v);
+  return nm->mkConst(v.toBitVector());
 }
 
 bool BvLsSolver::selfCheck(const std::vector<Node>& facts)
