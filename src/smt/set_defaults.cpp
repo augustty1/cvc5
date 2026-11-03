@@ -432,12 +432,20 @@ void SetDefaults::finalizeLogic(LogicInfo& logic, Options& opts) const
   // Local search (--bv-ls) runs as a pre-solver in eager bit-blasting mode,
   // where it sees whole assertions. Set it here so that the logic below
   // enables Ackermannization for eager mode.
-  if (opts.bv.bvLs && !opts.bv.bitblastModeWasSetByUser
-      && logic.isPure(THEORY_BV) && !logic.isQuantified()
+  if (opts.bv.bvLs && logic.isPure(THEORY_BV) && !logic.isQuantified()
       && opts.bv.bvSolver == options::BVSolver::BITBLAST
       && !opts.bv.bvAbstraction)
   {
-    SET_AND_NOTIFY(bv, bitblastMode, options::BitblastMode::EAGER, "bv-ls");
+    SET_AND_NOTIFY_IF_NOT_USER(
+        bv, bitblastMode, options::BitblastMode::EAGER, "bv-ls");
+    // When local search fails, bit-blast as cvc5's QF_BV configuration does:
+    // assert the input to the SAT solver rather than assume it. Proofs
+    // (handled before this point) require assumptions.
+    if (opts.bv.bitblastMode == options::BitblastMode::EAGER
+        && !opts.smt.produceProofs)
+    {
+      SET_AND_NOTIFY_IF_NOT_USER(bv, bvAssertInput, true, "bv-ls");
+    }
   }
 
   if (opts.bv.bitblastMode == options::BitblastMode::EAGER)

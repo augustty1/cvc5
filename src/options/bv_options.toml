@@ -171,7 +171,7 @@ name   = "Bitvector Theory"
   long       = "bv-ls"
   type       = "bool"
   default    = "false"
-  help       = "run propagation-based local search (FMSD'17) before bit-blasting, only with --bv-solver=bitblast on pure bit-vector logics; enables --bitblast=eager unless set"
+  help       = "run propagation-based local search (FMSD'17) before bit-blasting, only with --bv-solver=bitblast on pure bit-vector logics; enables --bitblast=eager and --bv-assert-input unless set"
 
 [[option]]
   name       = "bvLsNprops"
