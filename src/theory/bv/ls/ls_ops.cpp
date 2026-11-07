@@ -108,7 +108,7 @@ constexpr uint32_t kMaxDivisorTrials = 256;
 
 }  // namespace
 
-LsValue evaluate(const OpInfo& op, const std::vector<const LsValue*>& ch)
+LsValue evaluate(const OpInfo& op, const LsChildren& ch)
 {
   Assert(ch.size() == arity(op.kind));
   Assert(op.kind == LsKind::CONCAT || op.kind == LsKind::EXTRACT
@@ -143,9 +143,7 @@ LsValue evaluate(const OpInfo& op, const std::vector<const LsValue*>& ch)
 namespace {
 
 /** For CONCAT: the part of t that child posX must equal. */
-LsValue concatPartOf(uint32_t posX,
-                     const LsValue& t,
-                     const std::vector<const LsValue*>& ch)
+LsValue concatPartOf(uint32_t posX, const LsValue& t, const LsChildren& ch)
 {
   uint32_t w = t.getSize();
   if (posX == 0)
@@ -156,7 +154,7 @@ LsValue concatPartOf(uint32_t posX,
 }
 
 /** For ITE: return true if posX is the branch selected by the condition. */
-bool iteIsEnabled(uint32_t posX, const std::vector<const LsValue*>& ch)
+bool iteIsEnabled(uint32_t posX, const LsChildren& ch)
 {
   Assert(posX == 1 || posX == 2);
   return ch[0]->isBitSet(0) == (posX == 1);
@@ -213,7 +211,7 @@ bool icShiftAmount(const LsValue& s, const LsValue& t, bool left)
 /** Inverse value for a shift, see icShiftValue and icShiftAmount. */
 LsValue invShift(uint32_t posX,
                  const LsValue& t,
-                 const std::vector<const LsValue*>& ch,
+                 const LsChildren& ch,
                  bool left,
                  LsRng& rng)
 {
@@ -470,7 +468,7 @@ LsValue consUrem(uint32_t posX, const LsValue& t, LsRng& rng)
 /** Inverse value for (x <u s) = t (posX = 0) or (s <u x) = t (posX = 1). */
 LsValue invUlt(uint32_t posX,
                const LsValue& t,
-               const std::vector<const LsValue*>& ch,
+               const LsChildren& ch,
                LsRng& rng)
 {
   const LsValue& s = *ch[1 - posX];
@@ -503,7 +501,7 @@ LsValue consUlt(uint32_t posX, const LsValue& t, uint32_t w, LsRng& rng)
 LsValue computeInverse(const OpInfo& op,
                        uint32_t posX,
                        const LsValue& t,
-                       const std::vector<const LsValue*>& ch,
+                       const LsChildren& ch,
                        LsRng& rng)
 {
   uint32_t w = ch[posX]->getSize();
@@ -578,7 +576,7 @@ LsValue computeInverse(const OpInfo& op,
 bool isInvertible(const OpInfo& op,
                   uint32_t posX,
                   const LsValue& t,
-                  const std::vector<const LsValue*>& ch)
+                  const LsChildren& ch)
 {
   Assert(ch.size() == arity(op.kind));
   Assert(posX < ch.size());
@@ -635,7 +633,7 @@ bool isInvertible(const OpInfo& op,
 bool isEssential(const OpInfo& op,
                  uint32_t i,
                  const LsValue& t,
-                 const std::vector<const LsValue*>& ch)
+                 const LsChildren& ch)
 {
   Assert(ch.size() == arity(op.kind));
   Assert(i < ch.size());
@@ -652,13 +650,13 @@ bool isEssential(const OpInfo& op,
 LsValue inverseValue(const OpInfo& op,
                      uint32_t posX,
                      const LsValue& t,
-                     const std::vector<const LsValue*>& ch,
+                     const LsChildren& ch,
                      LsRng& rng)
 {
   Assert(isInvertible(op, posX, t, ch));
   LsValue x = computeInverse(op, posX, t, ch, rng);
 #ifdef CVC5_ASSERTIONS
-  std::vector<const LsValue*> chx = ch;
+  LsChildren chx = ch;
   chx[posX] = &x;
   Assert(evaluate(op, chx) == t) << "inverse value " << x << " for " << op.kind
                                  << " at " << posX << " does not produce " << t;
@@ -669,7 +667,7 @@ LsValue inverseValue(const OpInfo& op,
 LsValue consistentValue(const OpInfo& op,
                         uint32_t posX,
                         const LsValue& t,
-                        const std::vector<const LsValue*>& ch,
+                        const LsChildren& ch,
                         LsRng& rng)
 {
   Assert(ch.size() == arity(op.kind));

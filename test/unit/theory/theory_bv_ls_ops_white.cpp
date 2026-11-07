@@ -38,7 +38,7 @@ class TestTheoryWhiteBvLsOps : public TestInternal
   /** Evaluate op on the given children values. */
   static LsValue eval(const OpInfo& op, const std::vector<LsValue>& vals)
   {
-    std::vector<const LsValue*> ch;
+    LsChildren ch;
     for (const LsValue& v : vals)
     {
       ch.push_back(&v);
@@ -130,7 +130,7 @@ class TestTheoryWhiteBvLsOps : public TestInternal
 
       for (const std::vector<LsValue>& vals : assignments)
       {
-        std::vector<const LsValue*> ch;
+        LsChildren ch;
         for (const LsValue& v : vals)
         {
           ch.push_back(&v);
@@ -490,7 +490,7 @@ TEST_F(TestTheoryWhiteBvLsOps, is_essential)
       {
         vals.emplace_back(widths[i], digits[i]);
       }
-      std::vector<const LsValue*> ch;
+      LsChildren ch;
       for (const LsValue& v : vals)
       {
         ch.push_back(&v);
@@ -569,7 +569,7 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_wide)
           };
           LsValue a = draw();
           LsValue b = draw();
-          std::vector<const LsValue*> ch = {&a, &b};
+          LsChildren ch = {&a, &b};
           LsValue t = eval({k}, {a, b});
           std::stringstream ctx;
           ctx << k << " w=" << w << " pos=" << pos << " a=" << a << " b=" << b;
@@ -582,7 +582,7 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_wide)
           // A random target, not necessarily reachable.
           LsValue t2 = draw();
           LsValue c = consistentValue({k}, pos, t2, ch, d_rng);
-          std::vector<const LsValue*> chc = ch;
+          LsChildren chc = ch;
           chc[pos] = &c;
           ASSERT_TRUE(isInvertible({k}, 1 - pos, t2, chc))
               << ctx.str() << " t=" << t2 << " consistent=" << c;

@@ -147,7 +147,7 @@ class LsEngine
   /** Rebuild the parents, values and unsat roots after the roots changed. */
   void prepareRoots();
   /** Return the children values of n, in order. */
-  std::vector<const LsValue*> childValues(const Node& n) const;
+  LsChildren childValues(const Node& n) const;
   /** Recompute the value of node id from its children. */
   void reevaluate(uint32_t id);
   /** Add or remove root id from the unsat roots according to its value. */
@@ -162,8 +162,9 @@ class LsEngine
    * Select the child of n to propagate t to. Return its position, and whether
    * it is the only candidate; nothing if there is no candidate.
    */
-  std::optional<std::pair<uint32_t, bool>> selectPath(
-      const Node& n, const LsValue& t, const std::vector<const LsValue*>& ch);
+  std::optional<std::pair<uint32_t, bool>> selectPath(const Node& n,
+                                                      const LsValue& t,
+                                                      const LsChildren& ch);
   /**
    * Set leaf to v and re-evaluate its cone. Return false, and change nothing,
    * if leaf already has value v.
@@ -185,7 +186,13 @@ class LsEngine
   /** Parents of each node reachable from the roots. */
   std::vector<std::vector<uint32_t>> d_parents;
 
-  /** Scratch space of updateCone. */
+  /**
+   * Scratch space of updateCone: the cone being collected, the nodes whose
+   * parents are still to be visited, and the mark of the nodes already in the
+   * cone (those with d_coneMark equal to d_coneEpoch).
+   */
+  std::vector<uint32_t> d_cone;
+  std::vector<uint32_t> d_coneStack;
   std::vector<uint32_t> d_coneMark;
   uint32_t d_coneEpoch = 0;
 

@@ -15,9 +15,10 @@
 #define CVC5__THEORY__BV__LS__LS_OPS_H
 
 #include <cstdint>
+#include <initializer_list>
 #include <iosfwd>
-#include <vector>
 
+#include "base/check.h"
 #include "theory/bv/ls/ls_value.h"
 
 namespace cvc5::internal {
@@ -67,6 +68,48 @@ struct OpInfo
   uint32_t lo = 0;
 };
 
+/** The largest number of children of an operator. */
+constexpr uint32_t kMaxArity = 3;
+
+/**
+ * The values of the children of an operator, in order. It points to the
+ * values and does not own them, and it has a fixed capacity, so that building
+ * one for every evaluated node does not allocate.
+ */
+class LsChildren
+{
+ public:
+  LsChildren() : d_size(0) {}
+  LsChildren(std::initializer_list<const LsValue*> values) : d_size(0)
+  {
+    for (const LsValue* v : values)
+    {
+      push_back(v);
+    }
+  }
+
+  void push_back(const LsValue* v)
+  {
+    Assert(d_size < kMaxArity);
+    d_values[d_size++] = v;
+  }
+  uint32_t size() const { return d_size; }
+  const LsValue* operator[](uint32_t i) const
+  {
+    Assert(i < d_size);
+    return d_values[i];
+  }
+  const LsValue*& operator[](uint32_t i)
+  {
+    Assert(i < d_size);
+    return d_values[i];
+  }
+
+ private:
+  const LsValue* d_values[kMaxArity];
+  uint32_t d_size;
+};
+
 /**
  * The functions below take the current values of the operator's children in
  * ch, in order. Widths are read off the values. For the rule functions,
@@ -75,7 +118,7 @@ struct OpInfo
  */
 
 /** Return the value of op applied to the children values ch. */
-LsValue evaluate(const OpInfo& op, const std::vector<const LsValue*>& ch);
+LsValue evaluate(const OpInfo& op, const LsChildren& ch);
 
 /**
  * Return true if there is a value x' for child posX such that op evaluates
@@ -85,7 +128,7 @@ LsValue evaluate(const OpInfo& op, const std::vector<const LsValue*>& ch);
 bool isInvertible(const OpInfo& op,
                   uint32_t posX,
                   const LsValue& t,
-                  const std::vector<const LsValue*>& ch);
+                  const LsChildren& ch);
 
 /**
  * Return true if child i is essential for t (FMSD'17 Def. 13): no other child
@@ -97,7 +140,7 @@ bool isInvertible(const OpInfo& op,
 bool isEssential(const OpInfo& op,
                  uint32_t i,
                  const LsValue& t,
-                 const std::vector<const LsValue*>& ch);
+                 const LsChildren& ch);
 
 /**
  * Return a random value x' for child posX such that op evaluates to t with
@@ -106,7 +149,7 @@ bool isEssential(const OpInfo& op,
 LsValue inverseValue(const OpInfo& op,
                      uint32_t posX,
                      const LsValue& t,
-                     const std::vector<const LsValue*>& ch,
+                     const LsChildren& ch,
                      LsRng& rng);
 
 /**
@@ -117,7 +160,7 @@ LsValue inverseValue(const OpInfo& op,
 LsValue consistentValue(const OpInfo& op,
                         uint32_t posX,
                         const LsValue& t,
-                        const std::vector<const LsValue*>& ch,
+                        const LsChildren& ch,
                         LsRng& rng);
 
 }  // namespace ls

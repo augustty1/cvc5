@@ -99,10 +99,9 @@ void LsEngine::setRoots(const std::vector<uint32_t>& roots)
   d_rootsChanged = true;
 }
 
-std::vector<const LsValue*> LsEngine::childValues(const Node& n) const
+LsChildren LsEngine::childValues(const Node& n) const
 {
-  std::vector<const LsValue*> ch;
-  ch.reserve(n.children.size());
+  LsChildren ch;
   for (uint32_t c : n.children)
   {
     ch.push_back(&d_nodes[c].value);
@@ -259,7 +258,7 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
     {
       return std::nullopt;
     }
-    std::vector<const LsValue*> ch = childValues(n);
+    LsChildren ch = childValues(n);
     std::optional<std::pair<uint32_t, bool>> path = selectPath(n, t, ch);
     ++d_stats.props;
     if (!path)
@@ -283,9 +282,11 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
 }
 
 std::optional<std::pair<uint32_t, bool>> LsEngine::selectPath(
-    const Node& n, const LsValue& t, const std::vector<const LsValue*>& ch)
+    const Node& n, const LsValue& t, const LsChildren& ch)
 {
-  std::vector<uint32_t> inputs;
+  // The candidates: at most one per child.
+  uint32_t inputs[kMaxArity];
+  uint32_t numInputs = 0;
   for (uint32_t i = 0, size = n.children.size(); i < size; ++i)
   {
     if (d_nodes[n.children[i]].isConst)
@@ -297,33 +298,33 @@ std::optional<std::pair<uint32_t, bool>> LsEngine::selectPath(
     {
       continue;
     }
-    inputs.push_back(i);
+    inputs[numInputs++] = i;
   }
-  if (inputs.empty())
+  if (numInputs == 0)
   {
     return std::nullopt;
   }
-  if (inputs.size() == 1)
+  if (numInputs == 1)
   {
     return std::make_pair(inputs[0], true);
   }
   if (d_rng.pickWithProb(d_config.probEssential))
   {
-    std::vector<uint32_t> essential;
-    for (uint32_t i : inputs)
+    uint32_t essential[kMaxArity];
+    uint32_t numEssential = 0;
+    for (uint32_t j = 0; j < numInputs; ++j)
     {
-      if (isEssential(n.op, i, t, ch))
+      if (isEssential(n.op, inputs[j], t, ch))
       {
-        essential.push_back(i);
+        essential[numEssential++] = inputs[j];
       }
     }
-    if (!essential.empty())
+    if (numEssential > 0)
     {
-      return std::make_pair(essential[d_rng.pickIndex(essential.size())],
-                            false);
+      return std::make_pair(essential[d_rng.pickIndex(numEssential)], false);
     }
   }
-  return std::make_pair(inputs[d_rng.pickIndex(inputs.size())], false);
+  return std::make_pair(inputs[d_rng.pickIndex(numInputs)], false);
 }
 
 bool LsEngine::updateCone(uint32_t leaf, const LsValue& v)
@@ -340,29 +341,30 @@ bool LsEngine::updateCone(uint32_t leaf, const LsValue& v)
 
   // Collect the ancestors of leaf, then re-evaluate them in id order.
   ++d_coneEpoch;
-  std::vector<uint32_t> cone;
-  std::vector<uint32_t> stack = {leaf};
-  while (!stack.empty())
+  d_cone.clear();
+  d_coneStack.clear();
+  d_coneStack.push_back(leaf);
+  while (!d_coneStack.empty())
   {
-    uint32_t id = stack.back();
-    stack.pop_back();
+    uint32_t id = d_coneStack.back();
+    d_coneStack.pop_back();
     for (uint32_t p : d_parents[id])
     {
       if (d_coneMark[p] != d_coneEpoch)
       {
         d_coneMark[p] = d_coneEpoch;
-        cone.push_back(p);
-        stack.push_back(p);
+        d_cone.push_back(p);
+        d_coneStack.push_back(p);
       }
     }
   }
-  std::sort(cone.begin(), cone.end());
-  for (uint32_t id : cone)
+  std::sort(d_cone.begin(), d_cone.end());
+  for (uint32_t id : d_cone)
   {
     reevaluate(id);
     updateUnsat(id);
   }
-  d_stats.updates += cone.size();
+  d_stats.updates += d_cone.size();
   return true;
 }
 
