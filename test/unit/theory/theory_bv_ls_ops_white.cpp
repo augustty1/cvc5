@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "test.h"
+#include "theory/bv/ls/ls_domain.h"
 #include "theory/bv/ls/ls_ops.h"
 #include "theory/bv/ls/ls_value.h"
 
@@ -198,6 +199,128 @@ class TestTheoryWhiteBvLsOps : public TestInternal
         }
       }
     }
+  }
+
+  /** All assignments to children of the given widths. */
+  static std::vector<std::vector<LsValue>> allAssignments(
+      const std::vector<uint32_t>& widths)
+  {
+    uint32_t n = widths.size();
+    std::vector<std::vector<LsValue>> assignments;
+    std::vector<uint32_t> digits(n, 0);
+    while (true)
+    {
+      std::vector<LsValue> vals;
+      for (uint32_t i = 0; i < n; ++i)
+      {
+        vals.emplace_back(widths[i], digits[i]);
+      }
+      assignments.push_back(vals);
+      uint32_t i = 0;
+      while (i < n && ++digits[i] == (1u << widths[i]))
+      {
+        digits[i++] = 0;
+      }
+      if (i == n)
+      {
+        break;
+      }
+    }
+    return assignments;
+  }
+
+  /** All valid domains of width w: 3^w of them. */
+  static std::vector<TernaryDomain> allDomains(uint32_t w)
+  {
+    std::vector<TernaryDomain> res;
+    for (uint32_t lo = 0; lo < (1u << w); ++lo)
+    {
+      for (uint32_t hi = 0; hi < (1u << w); ++hi)
+      {
+        if ((lo & ~hi) == 0)
+        {
+          res.emplace_back(LsValue(w, lo), LsValue(w, hi));
+        }
+      }
+    }
+    return res;
+  }
+
+  /** All combinations of domains for children of the given widths. */
+  static std::vector<std::vector<TernaryDomain>> allDomainTuples(
+      const std::vector<uint32_t>& widths)
+  {
+    std::vector<std::vector<TernaryDomain>> res = {{}};
+    for (uint32_t w : widths)
+    {
+      std::vector<std::vector<TernaryDomain>> next;
+      for (const std::vector<TernaryDomain>& prefix : res)
+      {
+        for (const TernaryDomain& d : allDomains(w))
+        {
+          next.push_back(prefix);
+          next.back().push_back(d);
+        }
+      }
+      res = std::move(next);
+    }
+    return res;
+  }
+
+  /**
+   * Operators with the widths of their children, for the tests that go over
+   * all operators: every kind at operand width w, EXTRACT with every pair of
+   * indices, and CONCAT also with operands of different widths.
+   */
+  static std::vector<std::pair<OpInfo, std::vector<uint32_t>>> allOps(
+      uint32_t w)
+  {
+    std::vector<std::pair<OpInfo, std::vector<uint32_t>>> res;
+    res.push_back({{LsKind::NOT}, {w}});
+    for (LsKind k : {LsKind::AND,
+                     LsKind::EQ,
+                     LsKind::ULT,
+                     LsKind::ADD,
+                     LsKind::MUL,
+                     LsKind::UDIV,
+                     LsKind::UREM,
+                     LsKind::SHL,
+                     LsKind::LSHR,
+                     LsKind::CONCAT})
+    {
+      res.push_back({{k}, {w, w}});
+    }
+    if (w > 1)
+    {
+      res.push_back({{LsKind::CONCAT}, {1, w}});
+      res.push_back({{LsKind::CONCAT}, {w, 1}});
+    }
+    for (uint32_t hi = 0; hi < w; ++hi)
+    {
+      for (uint32_t lo = 0; lo <= hi; ++lo)
+      {
+        res.push_back({{LsKind::EXTRACT, hi, lo}, {w}});
+      }
+    }
+    res.push_back({{LsKind::ITE}, {1, w, w}});
+    return res;
+  }
+
+  static std::string opToString(const OpInfo& op,
+                                const std::vector<uint32_t>& widths)
+  {
+    std::stringstream ss;
+    ss << op.kind;
+    if (op.kind == LsKind::EXTRACT)
+    {
+      ss << "[" << op.hi << ":" << op.lo << "]";
+    }
+    ss << " widths";
+    for (uint32_t w : widths)
+    {
+      ss << " " << w;
+    }
+    return ss.str();
   }
 
   LsRng d_rng{42};
@@ -593,6 +716,169 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_wide)
             vals[pos] = y;
             ASSERT_EQ(eval({k}, vals), t2) << ctx.str() << " inverse=" << y;
           }
+        }
+      }
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Rules modulo constant bits                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * With a domain without fixed bits, the rules modulo constant bits are the
+ * base rules: same results and same random draws. This is what keeps a run
+ * without constant bits identical to the base local search.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, full_domain_is_base)
+{
+  for (uint32_t w = 1; w <= 3; ++w)
+  {
+    for (const auto& [op, widths] : allOps(w))
+    {
+      uint32_t n = widths.size();
+      std::vector<TernaryDomain> full;
+      for (uint32_t wi : widths)
+      {
+        full.push_back(TernaryDomain::full(wi));
+      }
+      LsDomains doms;
+      for (const TernaryDomain& d : full)
+      {
+        doms.push_back(&d);
+      }
+      std::vector<std::vector<LsValue>> assignments = allAssignments(widths);
+      uint32_t wt = eval(op, assignments[0]).getSize();
+      // Two generators in the same state: they stay so as long as both
+      // variants of a rule make the same draws.
+      LsRng r1(w);
+      LsRng r2(w);
+      for (uint32_t tv = 0; tv < (1u << wt); ++tv)
+      {
+        LsValue t(wt, tv);
+        for (const std::vector<LsValue>& vals : assignments)
+        {
+          LsChildren ch;
+          for (const LsValue& v : vals)
+          {
+            ch.push_back(&v);
+          }
+          for (uint32_t pos = 0; pos < n; ++pos)
+          {
+            std::stringstream ctx;
+            ctx << opToString(op, widths) << " pos=" << pos << " t=" << t;
+            const TernaryDomain& x = full[pos];
+            bool ic = isInvertible(op, pos, t, ch);
+            ASSERT_EQ(isInvertible(op, pos, t, ch, x), ic) << ctx.str();
+            ASSERT_TRUE(isConsistent(op, pos, t, ch, x)) << ctx.str();
+            ASSERT_EQ(isEssential(op, pos, t, ch, doms),
+                      isEssential(op, pos, t, ch))
+                << ctx.str();
+
+            if (ic)
+            {
+              ASSERT_EQ(inverseValue(op, pos, t, ch, x, r1),
+                        inverseValue(op, pos, t, ch, r2))
+                  << ctx.str();
+            }
+            ASSERT_EQ(consistentValue(op, pos, t, ch, x, r1),
+                      consistentValue(op, pos, t, ch, r2))
+                << ctx.str();
+            ASSERT_EQ(r1.randomValue(64), r2.randomValue(64)) << ctx.str();
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * forwardDomain is sound: the value of the operator matches it whenever the
+ * values of the children match their domains. Where it is documented to be
+ * exact, a bit is fixed iff it is the same for all those values.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, forward_domain)
+{
+  for (uint32_t w = 1; w <= 3; ++w)
+  {
+    for (const auto& [op, widths] : allOps(w))
+    {
+      if (w == 3 && (op.kind == LsKind::ITE || widths.size() == 2))
+      {
+        // Width 3 only for the unary operators and for one cheap binary one.
+        if (op.kind != LsKind::AND)
+        {
+          continue;
+        }
+      }
+      std::vector<std::vector<LsValue>> assignments = allAssignments(widths);
+      for (const std::vector<TernaryDomain>& ds : allDomainTuples(widths))
+      {
+        LsDomains doms;
+        bool allFixed = true;
+        std::stringstream ctx;
+        ctx << opToString(op, widths) << " domains";
+        for (const TernaryDomain& d : ds)
+        {
+          doms.push_back(&d);
+          allFixed = allFixed && d.isFixed();
+          ctx << " " << d;
+        }
+        TernaryDomain fd = forwardDomain(op, doms);
+        ASSERT_TRUE(fd.isValid()) << ctx.str();
+
+        // The values of the operator over the matching children values.
+        std::set<uint32_t> image;
+        for (const std::vector<LsValue>& vals : assignments)
+        {
+          bool match = true;
+          for (size_t i = 0; i < vals.size(); ++i)
+          {
+            match = match && ds[i].matches(vals[i]);
+          }
+          if (match)
+          {
+            LsValue v = eval(op, vals);
+            ASSERT_EQ(fd.getSize(), v.getSize()) << ctx.str();
+            ASSERT_TRUE(fd.matches(v)) << ctx.str() << " value " << v;
+            image.insert(v.toInteger().getUnsignedInt());
+          }
+        }
+
+        bool exact = allFixed;
+        switch (op.kind)
+        {
+          case LsKind::NOT:
+          case LsKind::AND:
+          case LsKind::CONCAT:
+          case LsKind::EXTRACT:
+          case LsKind::ITE: exact = true; break;
+          case LsKind::SHL:
+          case LsKind::LSHR: exact = exact || ds[1].isFixed(); break;
+          default: break;
+        }
+        if (allFixed)
+        {
+          ASSERT_TRUE(fd.isFixed()) << ctx.str();
+        }
+        if (exact)
+        {
+          for (uint32_t i = 0; i < fd.getSize(); ++i)
+          {
+            bool all0 = true;
+            bool all1 = true;
+            for (uint32_t v : image)
+            {
+              (((v >> i) & 1) != 0 ? all0 : all1) = false;
+            }
+            ASSERT_EQ(fd.isFixedTrue(i), all1) << ctx.str() << " bit " << i;
+            ASSERT_EQ(fd.isFixedFalse(i), all0) << ctx.str() << " bit " << i;
+          }
+        }
+        else
+        {
+          ASSERT_FALSE(fd.hasFixedBits()) << ctx.str();
         }
       }
     }

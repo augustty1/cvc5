@@ -6,7 +6,8 @@
  * ****************************************************************************
  *
  * Operator semantics for propagation-based local search over bit-vectors:
- * evaluation, invertibility conditions, inverse and consistent values.
+ * evaluation, invertibility and consistency conditions, inverse and
+ * consistent values, with and without constant bits.
  */
 
 #include "cvc5_private.h"
@@ -19,6 +20,7 @@
 #include <iosfwd>
 
 #include "base/check.h"
+#include "theory/bv/ls/ls_domain.h"
 #include "theory/bv/ls/ls_value.h"
 
 namespace cvc5::internal {
@@ -72,43 +74,49 @@ struct OpInfo
 constexpr uint32_t kMaxArity = 3;
 
 /**
- * The values of the children of an operator, in order. It points to the
- * values and does not own them, and it has a fixed capacity, so that building
- * one for every evaluated node does not allocate.
+ * One pointer per child of an operator, in order. It does not own what it
+ * points to, and it has a fixed capacity, so that building one for every
+ * evaluated node does not allocate.
  */
-class LsChildren
+template <class T>
+class LsPointers
 {
  public:
-  LsChildren() : d_size(0) {}
-  LsChildren(std::initializer_list<const LsValue*> values) : d_size(0)
+  LsPointers() : d_size(0) {}
+  LsPointers(std::initializer_list<const T*> values) : d_size(0)
   {
-    for (const LsValue* v : values)
+    for (const T* v : values)
     {
       push_back(v);
     }
   }
 
-  void push_back(const LsValue* v)
+  void push_back(const T* v)
   {
     Assert(d_size < kMaxArity);
     d_values[d_size++] = v;
   }
   uint32_t size() const { return d_size; }
-  const LsValue* operator[](uint32_t i) const
+  const T* operator[](uint32_t i) const
   {
     Assert(i < d_size);
     return d_values[i];
   }
-  const LsValue*& operator[](uint32_t i)
+  const T*& operator[](uint32_t i)
   {
     Assert(i < d_size);
     return d_values[i];
   }
 
  private:
-  const LsValue* d_values[kMaxArity];
+  const T* d_values[kMaxArity];
   uint32_t d_size;
 };
+
+/** The values of the children of an operator. */
+using LsChildren = LsPointers<LsValue>;
+/** The domains of the children of an operator. */
+using LsDomains = LsPointers<TernaryDomain>;
 
 /**
  * The functions below take the current values of the operator's children in
@@ -162,6 +170,87 @@ LsValue consistentValue(const OpInfo& op,
                         const LsValue& t,
                         const LsChildren& ch,
                         LsRng& rng);
+
+/*
+ * The rules modulo constant bits (FMCAD'20 Sec. IV). They take the domain x
+ * of the child being solved for, and only produce values that match it. The
+ * current value ch[posX] must match x. If x has no fixed bits, each of them
+ * is the function above, with the same random draws.
+ */
+
+/**
+ * Return true if there is a value x' matching x for child posX such that op
+ * evaluates to t with the other children fixed (the invertibility condition
+ * modulo constant bits, FMCAD'20 Tables II-III). Does not draw random
+ * numbers.
+ *
+ * Where the exact condition asks for a value in a large set (UDIV, UREM),
+ * only a bounded number of candidates is tried: the result may be false
+ * although such a value exists, but never the opposite.
+ */
+bool isInvertible(const OpInfo& op,
+                  uint32_t posX,
+                  const LsValue& t,
+                  const LsChildren& ch,
+                  const TernaryDomain& x);
+
+/**
+ * Return true if there is a value x' matching x for child posX such that op
+ * evaluates to t for some values of the other children (the consistency
+ * condition, FMCAD'20 Tables IV-V). Always true if x has no fixed bits. Does
+ * not draw random numbers, and is bounded like isInvertible.
+ */
+bool isConsistent(const OpInfo& op,
+                  uint32_t posX,
+                  const LsValue& t,
+                  const LsChildren& ch,
+                  const TernaryDomain& x);
+
+/**
+ * Return true if child i is essential for t modulo constant bits (FMCAD'20
+ * Def. 5): no other child has a value matching its own domain that makes op
+ * evaluate to t alone, i.e., isInvertible fails for every other position
+ * with that child's domain. A child whose domain is fixed cannot change, so
+ * it counts as not invertible, like the disabled branch of an ITE. doms are
+ * the domains of the children. Does not draw random numbers.
+ */
+bool isEssential(const OpInfo& op,
+                 uint32_t i,
+                 const LsValue& t,
+                 const LsChildren& ch,
+                 const LsDomains& doms);
+
+/**
+ * Return a random value x' matching x for child posX such that op evaluates
+ * to t with the other children fixed. Requires isInvertible(op, posX, t, ch,
+ * x).
+ */
+LsValue inverseValue(const OpInfo& op,
+                     uint32_t posX,
+                     const LsValue& t,
+                     const LsChildren& ch,
+                     const TernaryDomain& x,
+                     LsRng& rng);
+
+/**
+ * Return a random value x' matching x for child posX such that op evaluates
+ * to t for some values of the other children. Requires isConsistent(op,
+ * posX, t, ch, x).
+ */
+LsValue consistentValue(const OpInfo& op,
+                        uint32_t posX,
+                        const LsValue& t,
+                        const LsChildren& ch,
+                        const TernaryDomain& x,
+                        LsRng& rng);
+
+/**
+ * Return a domain that the value of op matches whenever the values of its
+ * children match doms, computed at the word level. It is exact for NOT, AND,
+ * CONCAT, EXTRACT and ITE, for shifts by a fixed amount, and when all
+ * children are fixed; otherwise it has no fixed bits.
+ */
+TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 
 }  // namespace ls
 }  // namespace bv

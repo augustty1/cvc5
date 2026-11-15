@@ -696,6 +696,211 @@ LsValue consistentValue(const OpInfo& op,
   Unreachable() << "consistentValue called on leaf kind " << op.kind;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Rules modulo constant bits                                                 */
+/* -------------------------------------------------------------------------- */
+
+namespace {
+
+/*
+ * The functions below are the rules for a domain x with fixed bits. The
+ * callers handle the domains without fixed bits with the base rules above.
+ */
+
+/**
+ * The part of the invertibility condition that concerns the fixed bits of x.
+ * Requires the base condition isInvertible(op, posX, t, ch) to hold.
+ */
+bool icFixedBits(const OpInfo& op,
+                 CVC5_UNUSED uint32_t posX,
+                 CVC5_UNUSED const LsValue& t,
+                 CVC5_UNUSED const LsChildren& ch,
+                 CVC5_UNUSED const TernaryDomain& x)
+{
+  Unimplemented() << "invertibility modulo constant bits for " << op.kind;
+}
+
+/** The consistency condition, see isConsistent. */
+bool ccFixedBits(const OpInfo& op,
+                 CVC5_UNUSED uint32_t posX,
+                 CVC5_UNUSED const LsValue& t,
+                 CVC5_UNUSED const LsChildren& ch,
+                 CVC5_UNUSED const TernaryDomain& x)
+{
+  Unimplemented() << "consistency modulo constant bits for " << op.kind;
+}
+
+/** The inverse value rules, see inverseValue. */
+LsValue inverseFixedBits(const OpInfo& op,
+                         CVC5_UNUSED uint32_t posX,
+                         CVC5_UNUSED const LsValue& t,
+                         CVC5_UNUSED const LsChildren& ch,
+                         CVC5_UNUSED const TernaryDomain& x,
+                         CVC5_UNUSED LsRng& rng)
+{
+  Unimplemented() << "inverse value modulo constant bits for " << op.kind;
+}
+
+/** The consistent value rules, see consistentValue. */
+LsValue consistentFixedBits(const OpInfo& op,
+                            CVC5_UNUSED uint32_t posX,
+                            CVC5_UNUSED const LsValue& t,
+                            CVC5_UNUSED const LsChildren& ch,
+                            CVC5_UNUSED const TernaryDomain& x,
+                            CVC5_UNUSED LsRng& rng)
+{
+  Unimplemented() << "consistent value modulo constant bits for " << op.kind;
+}
+
+}  // namespace
+
+bool isInvertible(const OpInfo& op,
+                  uint32_t posX,
+                  const LsValue& t,
+                  const LsChildren& ch,
+                  const TernaryDomain& x)
+{
+  Assert(x.getSize() == ch[posX]->getSize());
+  // Every condition modulo constant bits includes the base condition.
+  if (!isInvertible(op, posX, t, ch))
+  {
+    return false;
+  }
+  return !x.hasFixedBits() || icFixedBits(op, posX, t, ch, x);
+}
+
+bool isConsistent(const OpInfo& op,
+                  uint32_t posX,
+                  const LsValue& t,
+                  const LsChildren& ch,
+                  const TernaryDomain& x)
+{
+  Assert(ch.size() == arity(op.kind));
+  Assert(posX < ch.size());
+  Assert(x.getSize() == ch[posX]->getSize());
+  // Without fixed bits there always is a consistent value.
+  return !x.hasFixedBits() || ccFixedBits(op, posX, t, ch, x);
+}
+
+bool isEssential(const OpInfo& op,
+                 uint32_t i,
+                 const LsValue& t,
+                 const LsChildren& ch,
+                 const LsDomains& doms)
+{
+  Assert(ch.size() == arity(op.kind));
+  Assert(doms.size() == ch.size());
+  Assert(i < ch.size());
+  for (uint32_t j = 0, n = ch.size(); j < n; ++j)
+  {
+    if (j != i && !doms[j]->isFixed() && isInvertible(op, j, t, ch, *doms[j]))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+LsValue inverseValue(const OpInfo& op,
+                     uint32_t posX,
+                     const LsValue& t,
+                     const LsChildren& ch,
+                     const TernaryDomain& x,
+                     LsRng& rng)
+{
+  if (!x.hasFixedBits())
+  {
+    return inverseValue(op, posX, t, ch, rng);
+  }
+  Assert(x.matches(*ch[posX]))
+      << "current value " << *ch[posX] << " does not match " << x;
+  Assert(isInvertible(op, posX, t, ch, x));
+  LsValue v = inverseFixedBits(op, posX, t, ch, x, rng);
+#ifdef CVC5_ASSERTIONS
+  Assert(x.matches(v)) << "inverse value " << v << " for " << op.kind << " at "
+                       << posX << " does not match " << x;
+  LsChildren chx = ch;
+  chx[posX] = &v;
+  Assert(evaluate(op, chx) == t) << "inverse value " << v << " for " << op.kind
+                                 << " at " << posX << " does not produce " << t;
+#endif
+  return v;
+}
+
+LsValue consistentValue(const OpInfo& op,
+                        uint32_t posX,
+                        const LsValue& t,
+                        const LsChildren& ch,
+                        const TernaryDomain& x,
+                        LsRng& rng)
+{
+  if (!x.hasFixedBits())
+  {
+    return consistentValue(op, posX, t, ch, rng);
+  }
+  Assert(isConsistent(op, posX, t, ch, x));
+  LsValue v = consistentFixedBits(op, posX, t, ch, x, rng);
+  Assert(x.matches(v)) << "consistent value " << v << " for " << op.kind
+                       << " at " << posX << " does not match " << x;
+  return v;
+}
+
+TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
+{
+  Assert(doms.size() == arity(op.kind));
+  // If every child has a single value, so does the operator.
+  bool allFixed = true;
+  for (uint32_t i = 0, n = doms.size(); i < n; ++i)
+  {
+    allFixed = allFixed && doms[i]->isFixed();
+  }
+  if (allFixed)
+  {
+    LsChildren ch;
+    for (uint32_t i = 0, n = doms.size(); i < n; ++i)
+    {
+      ch.push_back(&doms[i]->lo);
+    }
+    return TernaryDomain::fixed(evaluate(op, ch));
+  }
+  const TernaryDomain& x = *doms[0];
+  switch (op.kind)
+  {
+    case LsKind::NOT: return notD(x);
+    case LsKind::AND: return andD(x, *doms[1]);
+    case LsKind::CONCAT: return concatD(x, *doms[1]);
+    case LsKind::EXTRACT: return extractD(x, op.hi, op.lo);
+    case LsKind::SHL:
+    case LsKind::LSHR:
+    {
+      const TernaryDomain& amount = *doms[1];
+      if (!amount.isFixed())
+      {
+        break;
+      }
+      uint32_t k = shiftAmount(amount.lo, x.getSize());
+      return op.kind == LsKind::SHL ? shlD(x, k) : lshrD(x, k);
+    }
+    case LsKind::ITE:
+      // The selected branch if the condition is fixed, else either branch.
+      if (x.isFixed())
+      {
+        return x.lo.isBitSet(0) ? *doms[1] : *doms[2];
+      }
+      return join(*doms[1], *doms[2]);
+    case LsKind::EQ:
+    case LsKind::ULT: return TernaryDomain::full(1);
+    case LsKind::ADD:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM: break;
+    case LsKind::CONST:
+    case LsKind::VAR:
+      Unreachable() << "forwardDomain called on leaf kind " << op.kind;
+  }
+  return TernaryDomain::full(x.getSize());
+}
+
 }  // namespace ls
 }  // namespace bv
 }  // namespace theory
