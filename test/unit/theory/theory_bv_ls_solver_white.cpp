@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "expr/skolem_manager.h"
+#include "options/bv_options.h"
 #include "test_smt.h"
 #include "theory/bv/ls/bv_ls_solver.h"
 #include "theory/bv/theory_bv_utils.h"
@@ -248,6 +249,39 @@ TEST_F(TestTheoryWhiteBvLsSolver, unpurify)
   ASSERT_EQ(ls.getValue(x), nm->mkConst(BitVector(8, 0u)));
   ASSERT_EQ(ls.getValue(k), b1);
   ASSERT_EQ(ls.getLeaves().size(), 2u);  // k and x
+}
+
+/** The adapter with --bv-ls-const-bits (prop-c, Step 5). */
+class TestTheoryWhiteBvLsSolverConstBits : public TestSmtNoFinishInit
+{
+ protected:
+  void SetUp() override
+  {
+    TestSmtNoFinishInit::SetUp();
+    d_slvEngine->setOption("bv-ls-const-bits", "true");
+    d_slvEngine->finishInit();
+  }
+};
+
+/**
+ * With constant bits, x = a o 0001 has the domain xxxx0001; x * 3 = 147 has
+ * the solution x = 49 = 0011 0001, so a = 3. The search finds it, the model
+ * is right, and a constant false fact gives UNKNOWN.
+ */
+TEST_F(TestTheoryWhiteBvLsSolverConstBits, check_and_model)
+{
+  ASSERT_TRUE(d_slvEngine->getOptions().bv.bvLsConstBits);
+  BvLsSolver ls(d_slvEngine->getEnv());
+  NodeManager* nm = d_nodeManager.get();
+  Node a = nm->mkVar("a", nm->mkBitVectorType(4));
+  Node x = nm->mkNode(Kind::BITVECTOR_CONCAT, a, nm->mkConst(BitVector(4, 1u)));
+  Node f = nm->mkNode(
+      Kind::EQUAL,
+      nm->mkNode(Kind::BITVECTOR_MULT, x, nm->mkConst(BitVector(8, 3u))),
+      nm->mkConst(BitVector(8, 147u)));
+  ASSERT_EQ(ls.check({f}), prop::SAT_VALUE_TRUE);
+  ASSERT_EQ(ls.getValue(a).getConst<BitVector>(), BitVector(4, 3u));
+  ASSERT_EQ(ls.check({f, nm->mkConst(false)}), prop::SAT_VALUE_UNKNOWN);
 }
 
 }  // namespace test
