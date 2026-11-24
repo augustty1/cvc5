@@ -34,9 +34,11 @@ class TestTheoryWhiteBvLsEngine : public TestInternal
 
   /**
    * Build a random DAG over 4-bit and Boolean nodes in e, drawing from rng,
-   * and return its roots.
+   * with numConsts 4-bit constants among its leaves, and return its roots.
    */
-  static std::vector<uint32_t> mkRandomDag(LsEngine& e, LsRng& rng)
+  static std::vector<uint32_t> mkRandomDag(LsEngine& e,
+                                           LsRng& rng,
+                                           uint32_t numConsts = 1)
   {
     const uint32_t w = 4;
     std::vector<uint32_t> bvs;
@@ -49,7 +51,10 @@ class TestTheoryWhiteBvLsEngine : public TestInternal
     {
       bools.push_back(mkVar(e, 1));
     }
-    bvs.push_back(mkConst(e, w, rng.pickIndex(16)));
+    for (uint32_t i = 0; i < numConsts; ++i)
+    {
+      bvs.push_back(mkConst(e, w, rng.pickIndex(16)));
+    }
     auto pick = [&](const std::vector<uint32_t>& v) {
       return v[rng.pickIndex(v.size())];
     };
@@ -343,6 +348,187 @@ TEST_F(TestTheoryWhiteBvLsEngine, invariants_random)
   }
   // Most random instances are satisfiable and easy.
   ASSERT_GT(numSat, 50u);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Constant bits (prop-c, Step 4)                                             */
+/* -------------------------------------------------------------------------- */
+
+/** An engine that uses constant bits. */
+static LsConfig constBitsConfig()
+{
+  LsConfig config;
+  config.constBits = true;
+  return config;
+}
+
+/**
+ * With constant bits, operator nodes get the domain computed from their
+ * children, and a node whose domain is fixed is a constant (plan D14).
+ * Without them, every operator node has the domain without fixed bits.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, const_bits_domains)
+{
+  LsEngine e(1, constBitsConfig());
+  uint32_t x = mkVar(e, 4);
+  uint32_t masked = e.mkOp(LsKind::AND, {mkConst(e, 4, 0b1110), x});
+  ASSERT_EQ(e.domain(x).toString(), "xxxx");
+  ASSERT_EQ(e.domain(masked).toString(), "xxx0");
+  uint32_t low = e.mkOp(LsKind::EXTRACT, {x}, 1, 0);
+  uint32_t cat = e.mkOp(LsKind::CONCAT, {low, mkConst(e, 2, 0b01)});
+  ASSERT_EQ(e.domain(cat).toString(), "xx01");
+  ASSERT_EQ(e.numFixedOps(), 0u);
+  // x & 0 is 0 for every x: a constant.
+  uint32_t zero = e.mkOp(LsKind::AND, {x, mkConst(e, 4, 0)});
+  ASSERT_TRUE(e.isConst(zero));
+  ASSERT_EQ(e.value(zero), LsValue(4, 0u));
+  ASSERT_EQ(e.numFixedOps(), 1u);
+
+  LsEngine base(1);
+  uint32_t bx = mkVar(base, 4);
+  uint32_t bzero = base.mkOp(LsKind::AND, {bx, mkConst(base, 4, 0)});
+  ASSERT_FALSE(base.isConst(bzero));
+  ASSERT_EQ(base.domain(bzero).toString(), "xxxx");
+}
+
+/**
+ * A root whose domain is fixed to false is a constant, so solve stops at once
+ * with UNKNOWN (and bit-blasting answers); the base local search searches
+ * until its budget runs out.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, const_bits_false_root)
+{
+  for (bool constBits : {false, true})
+  {
+    LsConfig config;
+    config.constBits = constBits;
+    LsEngine e(1, config);
+    uint32_t x = mkVar(e, 4);
+    uint32_t masked = e.mkOp(LsKind::AND, {x, mkConst(e, 4, 0b0011)});
+    // Bit 2 of x & 0011 is 0 for every x. (That (x & 0011) = 0100 is false
+    // too needs the domains of EQ from Step 6.)
+    uint32_t root = e.mkOp(LsKind::EXTRACT, {masked}, 2, 2);
+    ASSERT_EQ(e.isConst(root), constBits);
+    e.setRoots({root});
+    ASSERT_EQ(e.solve(500, 0), LsResult::UNKNOWN);
+    ASSERT_EQ(e.stats().props == 0, constBits);
+  }
+}
+
+/**
+ * FMCAD'20 Sec. IV: with x even (domain x0), x * s = 01 has neither an
+ * inverse nor a consistent value for x, so propagating to x is a conflict
+ * (Fig. 2, lines 5-6). The formula is unsatisfiable; the search never ends
+ * with a wrong SAT, and it records conflicts at the MUL node.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, const_bits_conflict)
+{
+  for (uint64_t seed = 0; seed < 10; ++seed)
+  {
+    LsEngine e(seed, constBitsConfig());
+    e.setCheckInvariants(true);
+    uint32_t even = e.mkOp(LsKind::CONCAT, {mkVar(e, 1), mkConst(e, 1, 0)});
+    ASSERT_EQ(e.domain(even).toString(), "x0");
+    uint32_t s = mkVar(e, 2);
+    uint32_t mul = e.mkOp(LsKind::MUL, {even, s});
+    e.setRoots({e.mkOp(LsKind::EQ, {mul, mkConst(e, 2, 0b01)})});
+    ASSERT_EQ(e.solve(1000, 0), LsResult::UNKNOWN);
+    ASSERT_GT(e.stats().conflicts, 0u);
+    ASSERT_GT(e.stats().conflictsByKind[static_cast<uint32_t>(LsKind::MUL)],
+              0u);
+  }
+}
+
+/**
+ * Without constants every domain is the one without fixed bits, so with or
+ * without constant bits the rules are the base rules and the runs are the
+ * same, draw for draw.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, const_bits_full_domains_same_run)
+{
+  for (uint64_t seed = 0; seed < 30; ++seed)
+  {
+    LsEngine e1(seed);
+    LsEngine e2(seed, constBitsConfig());
+    LsRng g1(seed + 200);
+    LsRng g2(seed + 200);
+    e1.setRoots(mkRandomDag(e1, g1, 0));
+    e2.setRoots(mkRandomDag(e2, g2, 0));
+    ASSERT_EQ(e2.domainStats().bitsFixed, 0u);
+    LsResult res1 = e1.solve(2000, 0);
+    LsResult res2 = e2.solve(2000, 0);
+    ASSERT_EQ(res1, res2) << "seed " << seed;
+    ASSERT_EQ(e1.stats().moves, e2.stats().moves) << "seed " << seed;
+    ASSERT_EQ(e1.stats().props, e2.stats().props) << "seed " << seed;
+    ASSERT_EQ(e1.stats().propsInv, e2.stats().propsInv) << "seed " << seed;
+    ASSERT_EQ(e1.stats().conflicts, e2.stats().conflicts) << "seed " << seed;
+    for (uint32_t id = 0; id < e1.numNodes(); ++id)
+    {
+      ASSERT_EQ(e1.value(id), e2.value(id)) << "seed " << seed;
+    }
+  }
+}
+
+/**
+ * With constant bits on random DAGs with several constants: the invariants,
+ * which include that every value matches its domain, hold after every move;
+ * a SAT answer makes every root true; the same seed gives the same run; and
+ * the DAGs do have constant bits.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, const_bits_random)
+{
+  uint32_t numSat = 0;
+  uint64_t bitsFixed = 0;
+  // The base local search on the same DAGs, for comparison only.
+  uint32_t numSatBase = 0;
+  uint64_t props = 0;
+  uint64_t propsBase = 0;
+  for (uint64_t seed = 0; seed < 100; ++seed)
+  {
+    LsEngine base(seed);
+    LsRng gBase(seed);
+    base.setRoots(mkRandomDag(base, gBase, 4));
+    numSatBase += base.solve(2000, 0) == LsResult::SAT;
+    propsBase += base.stats().props;
+
+    LsEngine e(seed, constBitsConfig());
+    LsEngine same(seed, constBitsConfig());
+    e.setCheckInvariants(true);
+    LsRng g(seed);
+    LsRng gSame(seed);
+    std::vector<uint32_t> roots = mkRandomDag(e, g, 4);
+    same.setRoots(mkRandomDag(same, gSame, 4));
+    e.setRoots(roots);
+    LsResult res = e.solve(2000, 0);
+    ASSERT_EQ(res, same.solve(2000, 0)) << "seed " << seed;
+    ASSERT_EQ(e.stats().props, same.stats().props) << "seed " << seed;
+    bitsFixed += e.domainStats().bitsFixed;
+    props += e.stats().props;
+    if (res == LsResult::SAT)
+    {
+      ++numSat;
+      for (uint32_t r : roots)
+      {
+        ASSERT_TRUE(e.value(r).isBitSet(0)) << "seed " << seed;
+      }
+    }
+    ASSERT_TRUE(e.checkInvariants()) << "seed " << seed;
+    // Change the roots and continue, as an incremental check-sat does.
+    std::vector<uint32_t> roots2 = mkRandomDag(e, g, 4);
+    roots2.push_back(roots[0]);
+    e.setRoots(roots2);
+    e.solve(500, 0);
+    ASSERT_TRUE(e.checkInvariants()) << "seed " << seed;
+  }
+  RecordProperty("sat", numSat);
+  RecordProperty("satBase", numSatBase);
+  RecordProperty("props", static_cast<int64_t>(props));
+  RecordProperty("propsBase", static_cast<int64_t>(propsBase));
+  RecordProperty("bitsFixed", static_cast<int64_t>(bitsFixed));
+  ASSERT_GT(numSat, 40u);
+  // The domains of Step 4 come from the structure (masks, shifts by
+  // constants, concat, extract, ITE); Step 6 adds arithmetic and predicates.
+  ASSERT_GT(bitsFixed, 20u);
 }
 
 }  // namespace test

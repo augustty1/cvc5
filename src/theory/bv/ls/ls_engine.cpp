@@ -32,6 +32,8 @@ uint32_t LsEngine::mkLeaf(uint32_t width, std::optional<LsValue> constValue)
   n.isConst = constValue.has_value();
   n.op.kind = n.isConst ? LsKind::CONST : LsKind::VAR;
   n.value = n.isConst ? *constValue : LsValue::mkZero(width);
+  n.dom =
+      n.isConst ? TernaryDomain::fixed(n.value) : TernaryDomain::full(width);
   d_nodes.push_back(std::move(n));
   return d_nodes.size() - 1;
 }
@@ -64,14 +66,26 @@ uint32_t LsEngine::mkOp(LsKind k,
   n.op = {k, hi, lo};
   n.children = children;
   n.value = evaluate(n.op, childValues(n));
+  uint32_t w = n.value.getSize();
   bool allConst =
       std::all_of(children.begin(), children.end(), [this](uint32_t c) {
         return d_nodes[c].isConst;
       });
+  // With constant bits, the domain of the node from those of its children
+  // (FMCAD'20 Sec. IV); it is sound, so the value of the node matches it.
+  n.dom = d_config.constBits ? forwardDomain(n.op, childDomains(n))
+                             : TernaryDomain::full(w);
+  Assert(n.dom.matches(n.value));
   uint32_t id;
   if (allConst)
   {
-    id = mkLeaf(n.value.getSize(), n.value);
+    id = mkLeaf(w, n.value);
+  }
+  else if (n.dom.isFixed())
+  {
+    // No assignment changes the value of the node: it is a constant.
+    ++d_numFixedOps;
+    id = mkLeaf(w, n.value);
   }
   else
   {
@@ -107,6 +121,16 @@ LsChildren LsEngine::childValues(const Node& n) const
     ch.push_back(&d_nodes[c].value);
   }
   return ch;
+}
+
+LsDomains LsEngine::childDomains(const Node& n) const
+{
+  LsDomains doms;
+  for (uint32_t c : n.children)
+  {
+    doms.push_back(&d_nodes[c].dom);
+  }
+  return doms;
 }
 
 void LsEngine::reevaluate(uint32_t id)
@@ -179,10 +203,20 @@ void LsEngine::prepareRoots()
     }
   }
 
-  // Parents and values, in topological (id) order.
+  // Parents and values, in topological (id) order, and the constant bits.
   std::sort(reachable.begin(), reachable.end());
+  d_domainStats = {};
   for (uint32_t id : reachable)
   {
+    const Node& n = d_nodes[id];
+    if (!n.isConst)
+    {
+      uint32_t w = n.value.getSize();
+      uint32_t fixedBits = w - n.dom.numFree();
+      d_domainStats.nodesWithFixedBits += fixedBits > 0;
+      d_domainStats.bitsFixed += fixedBits;
+      d_domainStats.bitsTotal += w;
+    }
     const std::vector<uint32_t>& ch = d_nodes[id].children;
     for (size_t i = 0; i < ch.size(); ++i)
     {
@@ -256,6 +290,7 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
     }
     if (n.isConst)
     {
+      ++d_stats.conflictsByKind[static_cast<uint32_t>(n.op.kind)];
       return std::nullopt;
     }
     LsChildren ch = childValues(n);
@@ -263,11 +298,36 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
     ++d_stats.props;
     if (!path)
     {
+      ++d_stats.conflictsByKind[static_cast<uint32_t>(n.op.kind)];
       return std::nullopt;
     }
     auto [i, onlyOne] = *path;
-    if ((onlyOne || d_rng.pickWithProb(d_config.probInverse))
-        && isInvertible(n.op, i, t, ch))
+    if (d_config.constBits)
+    {
+      // FMCAD'20 Fig. 2, lines 4-7: an inverse value if the invertibility
+      // condition modulo constant bits holds, else a consistent value, else
+      // a conflict.
+      const TernaryDomain& x = d_nodes[n.children[i]].dom;
+      if ((onlyOne || d_rng.pickWithProb(d_config.probInverse))
+          && isInvertible(n.op, i, t, ch, x))
+      {
+        t = inverseValue(n.op, i, t, ch, x, d_rng);
+        ++d_stats.propsInv;
+      }
+      else if (std::optional<LsValue> v =
+                   tryConsistentValue(n.op, i, t, ch, x, d_rng))
+      {
+        t = std::move(*v);
+        ++d_stats.propsCons;
+      }
+      else
+      {
+        ++d_stats.conflictsByKind[static_cast<uint32_t>(n.op.kind)];
+        return std::nullopt;
+      }
+    }
+    else if ((onlyOne || d_rng.pickWithProb(d_config.probInverse))
+             && isInvertible(n.op, i, t, ch))
     {
       t = inverseValue(n.op, i, t, ch, d_rng);
       ++d_stats.propsInv;
@@ -312,9 +372,18 @@ std::optional<std::pair<uint32_t, bool>> LsEngine::selectPath(
   {
     uint32_t essential[kMaxArity];
     uint32_t numEssential = 0;
+    // With constant bits, essential inputs modulo constant bits (FMCAD'20
+    // Def. 5): another child counts as invertible only within its domain.
+    LsDomains doms;
+    if (d_config.constBits)
+    {
+      doms = childDomains(n);
+    }
     for (uint32_t j = 0; j < numInputs; ++j)
     {
-      if (isEssential(n.op, inputs[j], t, ch))
+      bool ess = d_config.constBits ? isEssential(n.op, inputs[j], t, ch, doms)
+                                    : isEssential(n.op, inputs[j], t, ch);
+      if (ess)
       {
         essential[numEssential++] = inputs[j];
       }
@@ -387,6 +456,10 @@ bool LsEngine::checkInvariants() const
     reached[id] = true;
     const Node& n = d_nodes[id];
     if (!n.children.empty() && evaluate(n.op, childValues(n)) != n.value)
+    {
+      return false;
+    }
+    if (!n.dom.matches(n.value))
     {
       return false;
     }

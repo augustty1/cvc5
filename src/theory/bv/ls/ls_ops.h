@@ -57,6 +57,9 @@ enum class LsKind
   ITE,      // c ? x : y, c of width 1
 };
 
+/** The number of kinds. */
+constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::ITE) + 1;
+
 const char* toString(LsKind k);
 std::ostream& operator<<(std::ostream& os, LsKind k);
 

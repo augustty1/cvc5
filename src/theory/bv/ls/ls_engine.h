@@ -14,12 +14,14 @@
 #ifndef CVC5__THEORY__BV__LS__LS_ENGINE_H
 #define CVC5__THEORY__BV__LS__LS_ENGINE_H
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
 #include <vector>
 
+#include "theory/bv/ls/ls_domain.h"
 #include "theory/bv/ls/ls_ops.h"
 #include "theory/bv/ls/ls_value.h"
 
@@ -53,8 +55,28 @@ struct LsStats
   uint64_t propsCons = 0;
   /** Re-evaluated nodes, counting the leaf of each move. */
   uint64_t updates = 0;
-  /** Moves that ended without a leaf to change. */
+  /**
+   * Moves that ended without a leaf to change: no child of a node could be
+   * selected, or, with constant bits, no consistent value matched the domain
+   * of the selected child (FMCAD'20 Fig. 2, lines 5-6).
+   */
   uint64_t conflicts = 0;
+  /** The conflicts by the kind of the node where they happened. */
+  std::array<uint64_t, kNumLsKinds> conflictsByKind{};
+};
+
+/**
+ * The constant bits of the nodes reachable from the roots, over the nodes that
+ * are not constant leaves. Computed when the roots are prepared.
+ */
+struct LsDomainStats
+{
+  /** Operator nodes whose domain has some fixed bit. */
+  uint64_t nodesWithFixedBits = 0;
+  /** Fixed bits, summed over the nodes. */
+  uint64_t bitsFixed = 0;
+  /** Bits, summed over the nodes. */
+  uint64_t bitsTotal = 0;
 };
 
 /**
@@ -67,6 +89,15 @@ struct LsConfig
   uint32_t probInverse = 990;
   /** Restrict path selection to essential inputs, if there are any. */
   uint32_t probEssential = 990;
+  /**
+   * Use constant bits (prop-c, FMCAD'20 Sec. IV): every operator node gets the
+   * domain that forwardDomain computes from its children, a node whose domain
+   * is fixed is a constant, and path and value selection use the rules modulo
+   * constant bits, with conflicts. Without it every operator node has the
+   * domain without fixed bits and the engine is the base local search, with
+   * the same random draws.
+   */
+  bool constBits = false;
 };
 
 /**
@@ -91,6 +122,8 @@ class LsEngine
    * Return the node for op applied to the given children. Identical requests
    * return the same node. If all children are constants, the result is a
    * constant leaf; an ITE with a constant condition is its selected branch.
+   * With constant bits, a node whose domain is fixed is also a constant leaf:
+   * no assignment can change its value (plan D14).
    */
   uint32_t mkOp(LsKind k,
                 const std::vector<uint32_t>& children,
@@ -116,6 +149,20 @@ class LsEngine
   /** Return true if node id is a constant leaf. */
   bool isConst(uint32_t id) const { return d_nodes[id].isConst; }
 
+  /**
+   * Return the domain of node id: fixed for a constant, without fixed bits for
+   * a variable, and for an operator the domain computed from its children
+   * with constant bits, or the one without fixed bits otherwise. The value of
+   * the node always matches it.
+   */
+  const TernaryDomain& domain(uint32_t id) const { return d_nodes[id].dom; }
+
+  /** Return the constant bits of the nodes reachable from the roots. */
+  const LsDomainStats& domainStats() const { return d_domainStats; }
+
+  /** Return the number of operator nodes that became constants (D14). */
+  uint64_t numFixedOps() const { return d_numFixedOps; }
+
   /** Return the number of nodes. */
   uint32_t numNodes() const { return d_nodes.size(); }
 
@@ -129,9 +176,9 @@ class LsEngine
 
   /**
    * Return true if every node reachable from the roots equals the evaluation
-   * of its children, and the unsat roots are exactly the roots whose value is
-   * 0. Requires the roots to be prepared (solve was called since the last
-   * setRoots).
+   * of its children and matches its domain, and the unsat roots are exactly
+   * the roots whose value is 0. Requires the roots to be prepared (solve was
+   * called since the last setRoots).
    */
   bool checkInvariants() const;
 
@@ -141,6 +188,7 @@ class LsEngine
     OpInfo op;
     std::vector<uint32_t> children;
     LsValue value;
+    TernaryDomain dom;
     bool isConst = false;
   };
 
@@ -148,6 +196,8 @@ class LsEngine
   void prepareRoots();
   /** Return the children values of n, in order. */
   LsChildren childValues(const Node& n) const;
+  /** Return the children domains of n, in order. */
+  LsDomains childDomains(const Node& n) const;
   /** Recompute the value of node id from its children. */
   void reevaluate(uint32_t id);
   /** Add or remove root id from the unsat roots according to its value. */
@@ -197,6 +247,8 @@ class LsEngine
   uint32_t d_coneEpoch = 0;
 
   LsStats d_stats;
+  LsDomainStats d_domainStats;
+  uint64_t d_numFixedOps = 0;
   bool d_checkInvariants = false;
 };
 
