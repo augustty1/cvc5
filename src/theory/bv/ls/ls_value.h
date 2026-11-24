@@ -255,6 +255,8 @@ class LsValue
                                     const LsValue& t,
                                     LsRng& rng,
                                     uint32_t maxTrials);
+  friend void toWords(const LsValue& x, uint64_t* out);
+  friend uint32_t popcount(const LsValue& x);
 
   /** Return the value with the low w bits set. Requires w <= 64. */
   static uint64_t mask(uint32_t w)
@@ -386,6 +388,28 @@ LsValue randomDivisorAbove(const LsValue& n,
                            const LsValue& t,
                            LsRng& rng,
                            uint32_t maxTrials);
+
+/*
+ * The bits of a value as 64-bit words, least significant word first. Reading
+ * the bits of a value wider than 64 bits one at a time is slow: isBitSet goes
+ * through Integer::isBitSet, which builds two temporary integers per bit.
+ * Code that visits many bits converts the value to words once instead.
+ */
+
+/** Return the number of 64-bit words of a value of width w. */
+inline uint32_t numWords(uint32_t w) { return (w + 63) / 64; }
+
+/** Write the numWords(w) words of x to out. The bits above w are 0. */
+void toWords(const LsValue& x, uint64_t* out);
+
+/**
+ * Return the value of width w > 0 whose bits are those of words[0], ...,
+ * words[numWords(w) - 1]. The bits above w are ignored.
+ */
+LsValue fromWords(uint32_t w, const uint64_t* words);
+
+/** Return the number of bits of x that are 1. */
+uint32_t popcount(const LsValue& x);
 
 }  // namespace ls
 }  // namespace bv

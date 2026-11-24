@@ -436,6 +436,45 @@ static BitVector mkTestValue(uint32_t w, std::mt19937_64& gen)
   return BitVector(w, v);
 }
 
+/**
+ * toWords writes every word, with the bits of the value and 0 above the width;
+ * fromWords inverts it and ignores the bits above the width; popcount counts
+ * the 1s. The widths cover one word, a full word, and several words with and
+ * without a partial last word.
+ */
+TEST_F(TestTheoryWhiteBvLsValue, value_words)
+{
+  LsRng rng(29);
+  for (uint32_t w : {1u, 7u, 63u, 64u, 65u, 100u, 127u, 128u, 129u, 200u})
+  {
+    uint32_t n = numWords(w);
+    ASSERT_EQ(n, (w + 63) / 64);
+    for (uint32_t r = 0; r < 50; ++r)
+    {
+      LsValue v = r == 0   ? LsValue::mkZero(w)
+                  : r == 1 ? LsValue::mkOnes(w)
+                           : rng.randomValue(w);
+      std::vector<uint64_t> words(n, ~uint64_t(0));
+      toWords(v, words.data());
+      uint32_t ones = 0;
+      for (uint32_t i = 0; i < 64 * n; ++i)
+      {
+        bool bit = ((words[i / 64] >> (i % 64)) & 1) != 0;
+        ASSERT_EQ(bit, i < w && v.isBitSet(i))
+            << "w=" << w << " v=" << v << " bit " << i;
+        ones += bit;
+      }
+      ASSERT_EQ(popcount(v), ones) << "w=" << w << " v=" << v;
+      ASSERT_EQ(fromWords(w, words.data()), v) << "w=" << w;
+      if (w % 64 != 0)
+      {
+        words.back() |= ~uint64_t(0) << (w % 64);
+        ASSERT_EQ(fromWords(w, words.data()), v) << "w=" << w;
+      }
+    }
+  }
+}
+
 /** All pairs of values of the small widths. */
 TEST_F(TestTheoryWhiteBvLsValue, bitvector_ops_exhaustive)
 {

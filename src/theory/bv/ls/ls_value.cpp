@@ -10,7 +10,10 @@
 
 #include "theory/bv/ls/ls_value.h"
 
+#include <algorithm>
+#include <cctype>
 #include <ostream>
+#include <string>
 #include <vector>
 
 #include "base/check.h"
@@ -35,6 +38,28 @@ uint32_t ctz64(uint64_t v)
   }
   return n;
 #endif
+}
+
+/** Return the number of bits of v that are 1. */
+uint32_t popcount64(uint64_t v)
+{
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_popcountll(v);
+#else
+  uint32_t n = 0;
+  for (; v != 0; v &= v - 1)
+  {
+    ++n;
+  }
+  return n;
+#endif
+}
+
+/** Return the value of the hexadecimal digit c. */
+uint64_t hexDigit(char c)
+{
+  Assert(std::isxdigit(static_cast<unsigned char>(c)));
+  return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10;
 }
 
 /** Return the position of the highest set bit of v plus 1, and 0 for 0. */
@@ -415,6 +440,59 @@ LsValue randomDivisorAbove(const LsValue& n,
     return n;
   }
   return LsValue::raw(w, divisors[rng.pickIndex(divisors.size())]);
+}
+
+void toWords(const LsValue& x, uint64_t* out)
+{
+  if (!x.isWide())
+  {
+    out[0] = x.d_val;
+    return;
+  }
+  // One conversion to hexadecimal instead of one Integer per bit; this only
+  // uses the Integer interface, so it works with both GMP and CLN.
+  uint32_t n = numWords(x.d_size);
+  std::fill(out, out + n, 0);
+  std::string hex = x.d_wide->getValue().toString(16);
+  for (uint32_t i = 0, len = hex.size(); i < len; ++i)
+  {
+    // Digit i from the right holds bits [4i + 3 : 4i].
+    out[i / 16] |= hexDigit(hex[len - 1 - i]) << (4 * (i % 16));
+  }
+}
+
+LsValue fromWords(uint32_t w, const uint64_t* words)
+{
+  Assert(w > 0);
+  if (w <= LsValue::s_nativeSize)
+  {
+    return LsValue(w, words[0]);
+  }
+  static constexpr char kDigits[] = "0123456789abcdef";
+  uint32_t n = numWords(w);
+  std::string hex(16 * n, '0');
+  for (uint32_t i = 0; i < 16 * n; ++i)
+  {
+    hex[16 * n - 1 - i] = kDigits[(words[i / 16] >> (4 * (i % 16))) & 0xf];
+  }
+  // The constructor drops the bits above w.
+  return LsValue(w, Integer(hex, 16));
+}
+
+uint32_t popcount(const LsValue& x)
+{
+  if (!x.isWide())
+  {
+    return popcount64(x.d_val);
+  }
+  std::vector<uint64_t> words(numWords(x.d_size));
+  toWords(x, words.data());
+  uint32_t n = 0;
+  for (uint64_t v : words)
+  {
+    n += popcount64(v);
+  }
+  return n;
 }
 
 LsRng::LsRng(uint64_t seed) : d_rng(seed) {}

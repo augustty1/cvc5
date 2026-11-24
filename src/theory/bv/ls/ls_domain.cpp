@@ -11,6 +11,7 @@
 #include "theory/bv/ls/ls_domain.h"
 
 #include <ostream>
+#include <vector>
 
 #include "base/check.h"
 
@@ -18,6 +19,124 @@ namespace cvc5::internal {
 namespace theory {
 namespace bv {
 namespace ls {
+
+namespace {
+
+/** Return the value with the low n <= 64 bits set. */
+uint64_t lowMask(uint32_t n)
+{
+  return n >= 64 ? ~uint64_t(0) : (uint64_t(1) << n) - 1;
+}
+
+/** Return the number of trailing zeros of v. Requires v != 0. */
+uint32_t ctz64(uint64_t v)
+{
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_ctzll(v);
+#else
+  uint32_t n = 0;
+  for (; (v & 1) == 0; v >>= 1)
+  {
+    ++n;
+  }
+  return n;
+#endif
+}
+
+/** Return the number of bits of v that are 1. */
+uint32_t popcount64(uint64_t v)
+{
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_popcountll(v);
+#else
+  uint32_t n = 0;
+  for (; v != 0; v &= v - 1)
+  {
+    ++n;
+  }
+  return n;
+#endif
+}
+
+/** Return the len <= 64 bits of words that start at bit k. */
+uint64_t readBits(const uint64_t* words, uint32_t k, uint32_t len)
+{
+  uint32_t i = k / 64;
+  uint32_t o = k % 64;
+  uint64_t v = words[i] >> o;
+  if (o + len > 64)
+  {
+    v |= words[i + 1] << (64 - o);
+  }
+  return v & lowMask(len);
+}
+
+/** Or v < 2^len, len <= 64, into words starting at bit k. */
+void writeBits(uint64_t* words, uint32_t k, uint32_t len, uint64_t v)
+{
+  uint32_t i = k / 64;
+  uint32_t o = k % 64;
+  words[i] |= v << o;
+  if (o + len > 64)
+  {
+    words[i + 1] |= v >> (64 - o);
+  }
+}
+
+/**
+ * Call f(pos, len) for each run of consecutive 1s of the mask m of n words,
+ * by increasing position. A run that crosses a word boundary is passed as two
+ * runs.
+ */
+template <class F>
+void forEachRun(const uint64_t* m, uint32_t n, F f)
+{
+  for (uint32_t i = 0; i < n; ++i)
+  {
+    uint64_t mi = m[i];
+    while (mi != 0)
+    {
+      uint32_t b = ctz64(mi);
+      // The run starts at bit 0 of rest; it ends at the first 0 of rest.
+      uint64_t rest = mi >> b;
+      uint32_t len = rest == ~uint64_t(0) ? 64 : ctz64(~rest);
+      f(64 * i + b, len);
+      mi &= ~(lowMask(len) << b);
+    }
+  }
+}
+
+/**
+ * Pack the bits of v at the 1s of the mask m (n words each) into out, from
+ * the least significant one. out must hold numWords(popcount(m)) words, all
+ * 0.
+ */
+void gatherBits(const uint64_t* v, const uint64_t* m, uint32_t n, uint64_t* out)
+{
+  uint32_t k = 0;
+  forEachRun(m, n, [&](uint32_t pos, uint32_t len) {
+    writeBits(out, k, len, readBits(v, pos, len));
+    k += len;
+  });
+}
+
+/**
+ * The inverse of gatherBits: put the bits of c, from the least significant
+ * one, at the 1s of the mask m of n words. out must hold n words, all 0.
+ */
+void scatterBits(const uint64_t* c,
+                 const uint64_t* m,
+                 uint32_t n,
+                 uint64_t* out)
+{
+  uint32_t k = 0;
+  forEachRun(m, n, [&](uint32_t pos, uint32_t len) {
+    writeBits(out, pos, len, readBits(c, k, len));
+    k += len;
+  });
+}
+
+}  // namespace
 
 TernaryDomain::TernaryDomain(const LsValue& l, const LsValue& h)
     : d_lo(l), d_hi(h)
@@ -64,18 +183,7 @@ bool TernaryDomain::isValid(const LsValue& l, const LsValue& h)
   return l.getSize() == h.getSize() && isZero(l & ~h);
 }
 
-uint32_t TernaryDomain::numFree() const
-{
-  uint32_t n = 0;
-  for (uint32_t i = 0, w = getSize(); i < w; ++i)
-  {
-    if (!isFixedBit(i))
-    {
-      ++n;
-    }
-  }
-  return n;
-}
+uint32_t TernaryDomain::numFree() const { return popcount(freeMask()); }
 
 std::string TernaryDomain::toString() const
 {
@@ -154,70 +262,50 @@ LsValue compress(const TernaryDomain& x, const LsValue& v)
 {
   uint32_t w = x.getSize();
   Assert(v.getSize() == w);
-  uint32_t k = 0;
   if (w <= LsValue::s_nativeSize)
   {
-    uint64_t res = 0;
-    for (uint32_t i = 0; i < w; ++i)
-    {
-      if (!x.isFixedBit(i))
-      {
-        res |= uint64_t(v.isBitSet(i)) << k;
-        ++k;
-      }
-    }
-    Assert(k > 0);
-    return LsValue(k, res);
+    uint64_t m, val, out = 0;
+    toWords(x.freeMask(), &m);
+    toWords(v, &val);
+    Assert(m != 0);
+    gatherBits(&val, &m, 1, &out);
+    return LsValue(popcount64(m), out);
   }
-  Integer res(0);
-  for (uint32_t i = 0; i < w; ++i)
+  uint32_t n = numWords(w);
+  // The mask, the value and the result, n words each.
+  std::vector<uint64_t> buf(3 * n, 0);
+  toWords(x.freeMask(), buf.data());
+  toWords(v, buf.data() + n);
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < n; ++i)
   {
-    if (!x.isFixedBit(i))
-    {
-      if (v.isBitSet(i))
-      {
-        res.setBit(k, true);
-      }
-      ++k;
-    }
+    k += popcount64(buf[i]);
   }
   Assert(k > 0);
-  return LsValue(k, res);
+  gatherBits(buf.data() + n, buf.data(), n, buf.data() + 2 * n);
+  return fromWords(k, buf.data() + 2 * n);
 }
 
 LsValue expand(const TernaryDomain& x, const LsValue& c)
 {
   uint32_t w = x.getSize();
-  uint32_t k = 0;
+  Assert(c.getSize() == x.numFree());
   if (w <= LsValue::s_nativeSize)
   {
-    uint64_t res = 0;
-    for (uint32_t i = 0; i < w; ++i)
-    {
-      if (!x.isFixedBit(i))
-      {
-        res |= uint64_t(c.isBitSet(k)) << i;
-        ++k;
-      }
-    }
-    Assert(k == c.getSize());
+    uint64_t m, cval, out = 0;
+    toWords(x.freeMask(), &m);
+    toWords(c, &cval);
+    scatterBits(&cval, &m, 1, &out);
     // The free bits are 0 in lo, which adds the bits fixed to 1.
-    return LsValue(w, res) | x.lo();
+    return LsValue(w, out) | x.lo();
   }
-  Integer res(0);
-  for (uint32_t i = 0; i < w; ++i)
-  {
-    if (!x.isFixedBit(i))
-    {
-      if (c.isBitSet(k))
-      {
-        res.setBit(i, true);
-      }
-      ++k;
-    }
-  }
-  Assert(k == c.getSize());
-  return LsValue(w, res) | x.lo();
+  uint32_t n = numWords(w);
+  // The mask, c (numWords(c.getSize()) <= n words) and the result.
+  std::vector<uint64_t> buf(3 * n, 0);
+  toWords(x.freeMask(), buf.data());
+  toWords(c, buf.data() + n);
+  scatterBits(buf.data() + n, buf.data(), n, buf.data() + 2 * n);
+  return fromWords(w, buf.data() + 2 * n) | x.lo();
 }
 
 std::optional<LsValue> minMatchingGeq(const TernaryDomain& x, const LsValue& a)
@@ -267,6 +355,20 @@ std::optional<LsValue> maxMatchingLeq(const TernaryDomain& x, const LsValue& b)
 
 bool hasMatchingIn(const TernaryDomain& x, const LsValue& a, const LsValue& b)
 {
+  if (b.unsignedLessThan(a))
+  {
+    return false;
+  }
+  // lo is the smallest and hi the largest matching value, so if the range
+  // covers one of them no search is needed.
+  if (a.unsignedLessThanEq(x.lo()))
+  {
+    return x.lo().unsignedLessThanEq(b);
+  }
+  if (x.hi().unsignedLessThanEq(b))
+  {
+    return a.unsignedLessThanEq(x.hi());
+  }
   std::optional<LsValue> first = minMatchingGeq(x, a);
   return first && first->unsignedLessThanEq(b);
 }
@@ -282,20 +384,10 @@ LsValue pick(const TernaryDomain& x,
              const LsValue& b,
              LsRng& rng)
 {
-  Assert(a.unsignedLessThanEq(b));
-  if (!x.hasFixedBits())
-  {
-    return rng.randomInRange(a, b);
-  }
-  std::optional<LsValue> first = minMatchingGeq(x, a);
-  std::optional<LsValue> last = maxMatchingLeq(x, b);
-  Assert(first && last && first->unsignedLessThanEq(*last))
-      << "no value in [" << a << ", " << b << "] matches " << x;
-  if (*first == *last)
-  {
-    return *first;
-  }
-  return expand(x, rng.randomInRange(compress(x, *first), compress(x, *last)));
+  DomainSampler sampler(x, a, b);
+  Assert(!sampler.empty()) << "no value in [" << a << ", " << b << "] matches "
+                           << x;
+  return sampler.random(rng);
 }
 
 LsValue pickNotEqual(const TernaryDomain& x, const LsValue& s, LsRng& rng)
@@ -312,6 +404,64 @@ LsValue pickNotEqual(const TernaryDomain& x, const LsValue& s, LsRng& rng)
   }
   // s matches x, so x is not fixed and compress is defined.
   return expand(x, rng.randomNotEqual(compress(x, s)));
+}
+
+DomainSampler::DomainSampler(const TernaryDomain& x,
+                             const LsValue& a,
+                             const LsValue& b)
+    : d_x(x)
+{
+  Assert(a.getSize() == x.getSize() && b.getSize() == x.getSize());
+  if (b.unsignedLessThan(a))
+  {
+    return;
+  }
+  // lo is the smallest and hi the largest matching value: a range that covers
+  // one of them needs no search for that end.
+  std::optional<LsValue> first = a.unsignedLessThanEq(x.lo())
+                                     ? std::optional<LsValue>(x.lo())
+                                     : minMatchingGeq(x, a);
+  std::optional<LsValue> last = x.hi().unsignedLessThanEq(b)
+                                    ? std::optional<LsValue>(x.hi())
+                                    : maxMatchingLeq(x, b);
+  if (!first || !last || last->unsignedLessThan(*first))
+  {
+    return;
+  }
+  d_min = std::move(first);
+  d_max = std::move(last);
+  if (x.hasFixedBits() && *d_min != *d_max)
+  {
+    d_cmin = compress(x, *d_min);
+    d_cmax = compress(x, *d_max);
+  }
+}
+
+const LsValue& DomainSampler::min() const
+{
+  Assert(!empty());
+  return *d_min;
+}
+
+const LsValue& DomainSampler::max() const
+{
+  Assert(!empty());
+  return *d_max;
+}
+
+LsValue DomainSampler::random(LsRng& rng) const
+{
+  Assert(!empty());
+  if (!d_x.hasFixedBits())
+  {
+    // [min, max] = [a, b]: the draw of the rules without constant bits.
+    return rng.randomInRange(*d_min, *d_max);
+  }
+  if (*d_min == *d_max)
+  {
+    return *d_min;
+  }
+  return expand(d_x, rng.randomInRange(d_cmin, d_cmax));
 }
 
 }  // namespace ls

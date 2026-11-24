@@ -135,6 +135,45 @@ class TestTheoryWhiteBvLsDomain : public TestInternal
   /** Draws per expected value in the uniformity checks. */
   static constexpr uint32_t kDraws = 200;
 
+  /**
+   * A random domain of width w. kind 0 fixes each bit with probability 1/2,
+   * kind 1 with probability 1/4 (long runs of free bits), kind 2 with
+   * probability 3/4 (short runs).
+   */
+  static TernaryDomain randomDomain(uint32_t w, uint32_t kind, LsRng& rng)
+  {
+    LsValue fixed = rng.randomValue(w);
+    if (kind == 1)
+    {
+      fixed = fixed & rng.randomValue(w);
+    }
+    else if (kind == 2)
+    {
+      fixed = fixed | rng.randomValue(w);
+    }
+    LsValue bits = rng.randomValue(w) & fixed;
+    return TernaryDomain(bits, bits | ~fixed);
+  }
+
+  /** compress by its definition: the free bits of v, one at a time. */
+  static LsValue compressByBits(const TernaryDomain& x, const LsValue& v)
+  {
+    Integer res(0);
+    uint32_t k = 0;
+    for (uint32_t i = 0, w = x.getSize(); i < w; ++i)
+    {
+      if (!x.isFixedBit(i))
+      {
+        if (v.isBitSet(i))
+        {
+          res.setBit(k, true);
+        }
+        ++k;
+      }
+    }
+    return LsValue(k, res);
+  }
+
   LsRng d_rng{42};
 };
 
@@ -558,6 +597,156 @@ TEST_F(TestTheoryWhiteBvLsDomain, pick_full_matches_rng)
       }
       ASSERT_EQ(pick(x, a, b, r1), r2.randomInRange(a, b));
       ASSERT_EQ(pickNotEqual(x, a, r1), r2.randomNotEqual(a));
+    }
+  }
+}
+
+/**
+ * DomainSampler, for every domain and range of up to 4 bits (also b < a): it
+ * is empty iff no value of the range matches, its bounds are the smallest and
+ * largest matching values of the range, and it draws only those values.
+ */
+TEST_F(TestTheoryWhiteBvLsDomain, sampler_exhaustive)
+{
+  for (uint32_t w = 1; w <= kMaxWidth; ++w)
+  {
+    for (const TernaryDomain& x : allDomains(w))
+    {
+      std::vector<uint32_t> m = matching(x);
+      for (uint32_t a = 0; a < (1u << w); ++a)
+      {
+        for (uint32_t b = 0; b < (1u << w); ++b)
+        {
+          std::set<uint32_t> expected;
+          for (uint32_t v : m)
+          {
+            if (a <= v && v <= b)
+            {
+              expected.insert(v);
+            }
+          }
+          std::stringstream ctx;
+          ctx << x << " [" << a << ", " << b << "]";
+          LsValue av(w, a);
+          LsValue bv(w, b);
+          DomainSampler sampler(x, av, bv);
+          ASSERT_EQ(sampler.empty(), expected.empty()) << ctx.str();
+          ASSERT_EQ(hasMatchingIn(x, av, bv), !expected.empty()) << ctx.str();
+          if (expected.empty())
+          {
+            continue;
+          }
+          ASSERT_EQ(toUint(sampler.min()), *expected.begin()) << ctx.str();
+          ASSERT_EQ(toUint(sampler.max()), *expected.rbegin()) << ctx.str();
+          std::set<uint32_t> seen;
+          for (uint32_t i = 0; i < 32 * expected.size(); ++i)
+          {
+            LsValue v = sampler.random(d_rng);
+            ASSERT_TRUE(expected.count(toUint(v))) << ctx.str() << " v=" << v;
+            seen.insert(toUint(v));
+          }
+          ASSERT_EQ(seen, expected) << ctx.str();
+        }
+      }
+    }
+  }
+}
+
+/**
+ * A draw of DomainSampler is one draw of compressed values in
+ * [compress(min), compress(max)]: the same random numbers as before the
+ * sampler existed, so the rules keep their behavior for a given seed.
+ */
+TEST_F(TestTheoryWhiteBvLsDomain, sampler_draws)
+{
+  LsRng gen(37);
+  for (uint32_t w : {3u, 8u, 64u, 65u, 130u})
+  {
+    for (uint32_t r = 0; r < 100; ++r)
+    {
+      TernaryDomain x = randomDomain(w, r % 3, gen);
+      LsValue a = gen.randomValue(w);
+      LsValue b = gen.randomValue(w);
+      if (b.unsignedLessThan(a))
+      {
+        std::swap(a, b);
+      }
+      DomainSampler sampler(x, a, b);
+      std::optional<LsValue> first = minMatchingGeq(x, a);
+      std::optional<LsValue> last = maxMatchingLeq(x, b);
+      bool empty = !first || !last || last->unsignedLessThan(*first);
+      ASSERT_EQ(sampler.empty(), empty) << x;
+      if (empty)
+      {
+        continue;
+      }
+      ASSERT_EQ(sampler.min(), *first) << x;
+      ASSERT_EQ(sampler.max(), *last) << x;
+      LsRng r1(r);
+      LsRng r2(r);
+      for (uint32_t i = 0; i < 20; ++i)
+      {
+        LsValue v = sampler.random(r1);
+        LsValue expected = !x.hasFixedBits() ? r2.randomInRange(a, b)
+                           : *first == *last
+                               ? *first
+                               : expand(x,
+                                        r2.randomInRange(compress(x, *first),
+                                                         compress(x, *last)));
+        ASSERT_EQ(v, expected) << x << " [" << a << ", " << b << "]";
+        ASSERT_TRUE(x.matches(v));
+        ASSERT_TRUE(a.unsignedLessThanEq(v) && v.unsignedLessThanEq(b));
+      }
+    }
+  }
+}
+
+/**
+ * compress and expand on words agree with compress by its definition, for
+ * one-word and multi-word widths and for domains with long and short runs of
+ * free bits, including runs that cross a word boundary.
+ */
+TEST_F(TestTheoryWhiteBvLsDomain, compress_expand_words)
+{
+  LsRng gen(31);
+  std::vector<TernaryDomain> doms;
+  for (uint32_t w : {1u, 5u, 63u, 64u, 65u, 100u, 128u, 129u, 200u})
+  {
+    for (uint32_t r = 0; r < 150; ++r)
+    {
+      doms.push_back(randomDomain(w, r % 3, gen));
+    }
+  }
+  // Free bits 60 to 70 of 128, and a single free bit at 64.
+  LsValue ones128 = LsValue::mkOnes(128);
+  LsValue run = ones128.logicalRightShift(117).leftShift(60);
+  doms.emplace_back(LsValue::mkZero(128), run);
+  doms.emplace_back(~run, ones128);
+  doms.emplace_back(LsValue::mkZero(128), LsValue::mkOne(128).leftShift(64));
+  for (const TernaryDomain& x : doms)
+  {
+    if (x.isFixed())
+    {
+      continue;
+    }
+    uint32_t w = x.getSize();
+    uint32_t numFree = 0;
+    for (uint32_t i = 0; i < w; ++i)
+    {
+      numFree += !x.isFixedBit(i);
+    }
+    ASSERT_EQ(x.numFree(), numFree) << x;
+    for (uint32_t r = 0; r < 10; ++r)
+    {
+      // Any value, matching or not: compress reads only the free bits.
+      LsValue v = gen.randomValue(w);
+      LsValue c = compress(x, v);
+      ASSERT_EQ(c, compressByBits(x, v)) << x << " v=" << v;
+      ASSERT_EQ(expand(x, c), x.apply(v)) << x << " v=" << v;
+      LsValue d = gen.randomValue(numFree);
+      LsValue e = expand(x, d);
+      ASSERT_TRUE(x.matches(e)) << x << " c=" << d;
+      ASSERT_EQ(compress(x, e), d) << x << " c=" << d;
     }
   }
 }

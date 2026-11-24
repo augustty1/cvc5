@@ -151,6 +151,10 @@ TernaryDomain join(const TernaryDomain& x, const TernaryDomain& y);
  * contiguous range of numbers. This is the idea of Bitwuzla's
  * BitVectorDomainGenerator. None of the functions without an LsRng argument
  * draws random numbers.
+ *
+ * compress and expand work on 64-bit words and move each run of consecutive
+ * free bits at once, so their cost grows with the number of such runs, not
+ * with the width.
  */
 
 /**
@@ -186,6 +190,47 @@ LsValue pick(const TernaryDomain& x,
  * Requires such a value to exist, i.e., x is not fixed to s.
  */
 LsValue pickNotEqual(const TernaryDomain& x, const LsValue& s, LsRng& rng);
+
+/**
+ * The values in a range [a, b] that match a domain x, for drawing uniform
+ * values among them (Bitwuzla's BitVectorDomainGenerator). The bounds of the
+ * matching values and their compressed forms are computed once, so each draw
+ * costs one random number and one expand. Without fixed bits, a draw is
+ * rng.randomInRange(a, b), as in the rules without constant bits.
+ */
+class DomainSampler
+{
+ public:
+  /**
+   * The values in [a, b] that match x. Requires a and b to have the width of
+   * x; the range is empty if b < a.
+   */
+  DomainSampler(const TernaryDomain& x, const LsValue& a, const LsValue& b);
+
+  /** Return true if no value in [a, b] matches x. */
+  bool empty() const { return !d_min.has_value(); }
+  /** Return the smallest value in [a, b] that matches x. Requires !empty(). */
+  const LsValue& min() const;
+  /** Return the largest value in [a, b] that matches x. Requires !empty(). */
+  const LsValue& max() const;
+  /**
+   * Return a uniform value among those in [a, b] that match x. Requires
+   * !empty().
+   */
+  LsValue random(LsRng& rng) const;
+
+ private:
+  TernaryDomain d_x;
+  /** The smallest and largest matching values in [a, b], if there are any. */
+  std::optional<LsValue> d_min;
+  std::optional<LsValue> d_max;
+  /**
+   * compress(d_x, *d_min) and compress(d_x, *d_max), set if d_x has fixed
+   * bits and *d_min != *d_max.
+   */
+  LsValue d_cmin;
+  LsValue d_cmax;
+};
 
 }  // namespace ls
 }  // namespace bv
