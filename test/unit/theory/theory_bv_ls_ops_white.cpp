@@ -77,6 +77,8 @@ class TestTheoryWhiteBvLsOps : public TestInternal
   static constexpr uint32_t kCoverageSamples = 256;
   /** Maximum width of x for the coverage checks. */
   static constexpr uint32_t kCoverageWidth = 3;
+  /** In a sampled check, about one case in kSampleRate is checked. */
+  static constexpr uint32_t kSampleRate = 16;
 
   /**
    * Check the rules of op for child posX exhaustively, with the children of
@@ -305,6 +307,151 @@ class TestTheoryWhiteBvLsOps : public TestInternal
     }
     res.push_back({{LsKind::ITE}, {1, w, w}});
     return res;
+  }
+
+  /**
+   * Check the rules modulo constant bits of op for child posX against brute
+   * force, for every domain x of that child with a fixed bit, every target t
+   * and every assignment of the children in which the value of the child
+   * matches x:
+   *  - isInvertible(op, posX, t, ch, x) holds iff some value matching x is a
+   *    solution, i.e., produces t with the other children fixed (always
+   *    false for the disabled branch of an ITE);
+   *  - inverse values are solutions that match x (plan R1);
+   *  - tryConsistentValue returns a value iff some value matching x is
+   *    consistent, i.e., produces t with some values of the other children,
+   *    and it returns such a value (for a branch of an ITE the consistent
+   *    value is t, iff it matches x, plan D11);
+   *  - if x has at most kCoverageWidth bits, the inverse values cover all
+   *    solutions and the consistent values all consistent values that match
+   *    x (plan R2, R3).
+   * If sampled, about one case in kSampleRate is checked, with kSamples
+   * draws and no coverage check.
+   */
+  void checkRulesDomains(const OpInfo& op,
+                         uint32_t posX,
+                         const std::vector<uint32_t>& widths,
+                         bool sampled)
+  {
+    uint32_t wx = widths[posX];
+    std::vector<std::vector<LsValue>> assignments = allAssignments(widths);
+    uint32_t wt = eval(op, assignments[0]).getSize();
+    bool iteBranch = op.kind == LsKind::ITE && posX > 0;
+    bool coverage = !sampled && wx <= kCoverageWidth;
+    uint32_t samples = coverage ? kCoverageSamples : kSamples;
+    // Selects the sampled cases, independently of the rules' draws.
+    LsRng select(31 * wx + posX);
+    for (uint32_t tv = 0; tv < (1u << wt); ++tv)
+    {
+      LsValue t(wt, tv);
+      // The consistent values of x, ignoring its domain.
+      std::set<uint32_t> consistentAll;
+      for (const std::vector<LsValue>& vals : assignments)
+      {
+        if (eval(op, vals) == t)
+        {
+          consistentAll.insert(vals[posX].toInteger().getUnsignedInt());
+        }
+      }
+      for (const TernaryDomain& x : allDomains(wx))
+      {
+        if (!x.hasFixedBits())
+        {
+          continue;  // the base rules, see full_domain_is_base
+        }
+        std::set<uint32_t> consistent;
+        for (uint32_t v : consistentAll)
+        {
+          if (x.matches(LsValue(wx, v)))
+          {
+            consistent.insert(v);
+          }
+        }
+        if (iteBranch)
+        {
+          consistent.clear();
+          if (x.matches(t))
+          {
+            consistent.insert(tv);
+          }
+        }
+        for (const std::vector<LsValue>& vals : assignments)
+        {
+          if (!x.matches(vals[posX])
+              || (sampled && select.pickIndex(kSampleRate) != 0))
+          {
+            continue;
+          }
+          LsChildren ch;
+          for (const LsValue& v : vals)
+          {
+            ch.push_back(&v);
+          }
+          std::stringstream ctx;
+          ctx << opToString(op, widths) << " pos=" << posX << " x=" << x
+              << " t=" << t;
+          for (uint32_t i = 0; i < vals.size(); ++i)
+          {
+            ctx << " ch" << i << "=" << vals[i];
+          }
+
+          std::set<uint32_t> solutions;
+          for (uint32_t xv = 0; xv < (1u << wx); ++xv)
+          {
+            std::vector<LsValue> valsx = vals;
+            valsx[posX] = LsValue(wx, xv);
+            if (x.matches(valsx[posX]) && eval(op, valsx) == t)
+            {
+              solutions.insert(xv);
+            }
+          }
+          bool expectedIc = !solutions.empty();
+          if (iteBranch && vals[0].isBitSet(0) != (posX == 1))
+          {
+            expectedIc = false;  // the disabled branch
+          }
+          ASSERT_EQ(isInvertible(op, posX, t, ch, x), expectedIc) << ctx.str();
+          if (expectedIc)
+          {
+            std::set<uint32_t> seen;
+            for (uint32_t i = 0; i < samples; ++i)
+            {
+              LsValue v = inverseValue(op, posX, t, ch, x, d_rng);
+              ASSERT_EQ(v.getSize(), wx) << ctx.str();
+              uint32_t vv = v.toInteger().getUnsignedInt();
+              ASSERT_TRUE(solutions.count(vv)) << ctx.str() << " inverse=" << v;
+              seen.insert(vv);
+            }
+            if (coverage)
+            {
+              ASSERT_EQ(seen, solutions) << ctx.str() << " (inverse coverage)";
+            }
+          }
+
+          std::set<uint32_t> seen;
+          for (uint32_t i = 0; i < samples; ++i)
+          {
+            std::optional<LsValue> v =
+                tryConsistentValue(op, posX, t, ch, x, d_rng);
+            ASSERT_EQ(v.has_value(), !consistent.empty()) << ctx.str();
+            if (!v)
+            {
+              break;
+            }
+            ASSERT_EQ(v->getSize(), wx) << ctx.str();
+            uint32_t vv = v->toInteger().getUnsignedInt();
+            ASSERT_TRUE(consistent.count(vv))
+                << ctx.str() << " consistent=" << *v;
+            seen.insert(vv);
+          }
+          if (coverage)
+          {
+            ASSERT_EQ(seen, consistent)
+                << ctx.str() << " (consistent coverage)";
+          }
+        }
+      }
+    }
   }
 
   static std::string opToString(const OpInfo& op,
@@ -791,6 +938,46 @@ TEST_F(TestTheoryWhiteBvLsOps, full_domain_is_base)
           }
         }
       }
+    }
+  }
+}
+
+/**
+ * The rules modulo constant bits of NOT, AND, EQ, ADD, CONCAT, EXTRACT and
+ * ITE (goal 4 of Step 3) against brute force: every domain with a fixed bit
+ * up to 3 bits, sampled at 4 bits.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_bitwise)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    bool sampled = w == 4;
+    checkRulesDomains({LsKind::NOT}, 0, {w}, sampled);
+    for (LsKind k : {LsKind::AND, LsKind::EQ, LsKind::ADD, LsKind::CONCAT})
+    {
+      for (uint32_t pos = 0; pos < 2; ++pos)
+      {
+        checkRulesDomains({k}, pos, {w, w}, sampled);
+      }
+    }
+    if (w > 1)
+    {
+      for (uint32_t pos = 0; pos < 2; ++pos)
+      {
+        checkRulesDomains({LsKind::CONCAT}, pos, {1, w}, sampled);
+        checkRulesDomains({LsKind::CONCAT}, pos, {w, 1}, sampled);
+      }
+    }
+    for (uint32_t hi = 0; hi < w; ++hi)
+    {
+      for (uint32_t lo = 0; lo <= hi; ++lo)
+      {
+        checkRulesDomains({LsKind::EXTRACT, hi, lo}, 0, {w}, sampled);
+      }
+    }
+    for (uint32_t pos = 0; pos < 3; ++pos)
+    {
+      checkRulesDomains({LsKind::ITE}, pos, {1, w, w}, sampled);
     }
   }
 }

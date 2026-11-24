@@ -705,30 +705,134 @@ namespace {
 /*
  * The functions below are the rules for a domain x with fixed bits. The
  * callers handle the domains without fixed bits with the base rules above.
+ *
+ * The conditions are those of FMCAD'20 Tables II-III (invertibility, IC) and
+ * IV-V (consistency, CC), with the erratum for x <u s; the values are those
+ * of FMSD'17 Tables 2-4 restricted to the values that match x. Every value
+ * that the rules can return for a given x, t and ch has a non-zero
+ * probability (plan, Sec. 0.5). Where a value is built by setting some bits
+ * and drawing the others, x.apply forces the fixed bits of x, which the
+ * condition guarantees to agree with the bits that were set.
  */
+
+/** The constant 1 or 0 of width 1. */
+const LsValue& boolValue(bool b)
+{
+  static const LsValue kTrue = mkBool(true);
+  static const LsValue kFalse = mkBool(false);
+  return b ? kTrue : kFalse;
+}
 
 /**
  * The part of the invertibility condition that concerns the fixed bits of x.
  * Requires the base condition isInvertible(op, posX, t, ch) to hold.
  */
 bool icFixedBits(const OpInfo& op,
-                 CVC5_UNUSED uint32_t posX,
-                 CVC5_UNUSED const LsValue& t,
-                 CVC5_UNUSED const LsChildren& ch,
-                 CVC5_UNUSED const TernaryDomain& x)
+                 uint32_t posX,
+                 const LsValue& t,
+                 const LsChildren& ch,
+                 const TernaryDomain& x)
 {
-  Unimplemented() << "invertibility modulo constant bits for " << op.kind;
+  switch (op.kind)
+  {
+    // ~x = t: Table III, mcb(x, ~t).
+    case LsKind::NOT: return x.matches(~t);
+    case LsKind::AND:
+    {
+      // x & s = t: Table III, the base condition (t & s) = t and
+      // ((s & x^hi) & c) = (t & c) for the fixed bits c of x: where s is 1, x
+      // must equal t, so a fixed bit of x there must be the bit of t.
+      const LsValue& s = *ch[1 - posX];
+      LsValue fixed = ~x.freeMask();
+      return ((s & x.hi()) & fixed) == (t & fixed);
+    }
+    case LsKind::EQ:
+    {
+      // (x = s) = t: Table II, (t => mcb(x, s)) and (not t => x is not fixed
+      // to s).
+      const LsValue& s = *ch[1 - posX];
+      return t.isBitSet(0) ? x.matches(s) : !(x.isFixed() && x.lo() == s);
+    }
+    // x + s = t: Table III, mcb(x, t - s).
+    case LsKind::ADD: return x.matches(t - *ch[1 - posX]);
+    // x o s = t, s o x = t: Table III, the base condition (s is the rest of
+    // t) and mcb(x, the part of t for x).
+    case LsKind::CONCAT: return x.matches(concatPartOf(posX, t, ch));
+    // x[u:l] = t: Table III, mcb(x[u:l], t).
+    case LsKind::EXTRACT: return extractD(x, op.hi, op.lo).matches(t);
+    case LsKind::ITE:
+      // Not in the paper (plan D16). For the condition, a branch equal to t
+      // whose selecting value matches x; for a branch, it must be enabled
+      // (the base condition) and t must match x.
+      if (posX == 0)
+      {
+        return (*ch[1] == t && x.matches(boolValue(true)))
+               || (*ch[2] == t && x.matches(boolValue(false)));
+      }
+      return x.matches(t);
+    case LsKind::ULT:
+    case LsKind::SHL:
+    case LsKind::LSHR:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM:
+      Unimplemented() << "invertibility modulo constant bits for " << op.kind;
+    case LsKind::CONST:
+    case LsKind::VAR: break;
+  }
+  Unreachable() << "isInvertible called on leaf kind " << op.kind;
 }
 
-/** The inverse value rules, see inverseValue. */
+/** The inverse value rules, see inverseValue. Requires icFixedBits. */
 LsValue inverseFixedBits(const OpInfo& op,
-                         CVC5_UNUSED uint32_t posX,
-                         CVC5_UNUSED const LsValue& t,
-                         CVC5_UNUSED const LsChildren& ch,
-                         CVC5_UNUSED const TernaryDomain& x,
-                         CVC5_UNUSED LsRng& rng)
+                         uint32_t posX,
+                         const LsValue& t,
+                         const LsChildren& ch,
+                         const TernaryDomain& x,
+                         LsRng& rng)
 {
-  Unimplemented() << "inverse value modulo constant bits for " << op.kind;
+  uint32_t w = x.getSize();
+  switch (op.kind)
+  {
+    case LsKind::NOT: return ~t;
+    case LsKind::AND:
+      // Where s is 1, the bit of t; elsewhere any bit that matches x.
+      return x.apply(t | (rng.randomValue(w) & ~*ch[1 - posX]));
+    case LsKind::EQ:
+    {
+      const LsValue& s = *ch[1 - posX];
+      return t.isBitSet(0) ? s : pickNotEqual(x, s, rng);
+    }
+    case LsKind::ADD: return t - *ch[1 - posX];
+    case LsKind::CONCAT: return concatPartOf(posX, t, ch);
+    case LsKind::EXTRACT:
+      // The base rule (the bits outside [u:l] kept, drawn, or set to all 0s
+      // or all 1s) with the fixed bits forced in; the slice is t, which
+      // matches x there.
+      return x.apply(computeInverse(op, posX, t, ch, rng));
+    case LsKind::ITE:
+    {
+      if (posX > 0)
+      {
+        return t;
+      }
+      // A condition that selects a branch equal to t; x is fixed here, since
+      // a domain of width 1 with a fixed bit has a single value.
+      bool a = *ch[1] == t && x.matches(boolValue(true));
+      bool b = *ch[2] == t && x.matches(boolValue(false));
+      return a && b ? rng.randomValue(1) : boolValue(a);
+    }
+    case LsKind::ULT:
+    case LsKind::SHL:
+    case LsKind::LSHR:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM:
+      Unimplemented() << "inverse value modulo constant bits for " << op.kind;
+    case LsKind::CONST:
+    case LsKind::VAR: break;
+  }
+  Unreachable() << "inverseValue called on leaf kind " << op.kind;
 }
 
 /**
@@ -736,13 +840,67 @@ LsValue inverseFixedBits(const OpInfo& op,
  * tryConsistentValue.
  */
 std::optional<LsValue> consistentFixedBits(const OpInfo& op,
-                                           CVC5_UNUSED uint32_t posX,
-                                           CVC5_UNUSED const LsValue& t,
-                                           CVC5_UNUSED const LsChildren& ch,
-                                           CVC5_UNUSED const TernaryDomain& x,
-                                           CVC5_UNUSED LsRng& rng)
+                                           uint32_t posX,
+                                           const LsValue& t,
+                                           const LsChildren& ch,
+                                           const TernaryDomain& x,
+                                           LsRng& rng)
 {
-  Unimplemented() << "consistent value modulo constant bits for " << op.kind;
+  uint32_t w = x.getSize();
+  switch (op.kind)
+  {
+    case LsKind::NOT:
+    {
+      // Table V: mcb(x, ~t); ~t is the only consistent value.
+      LsValue v = ~t;
+      return x.matches(v) ? std::optional<LsValue>(v) : std::nullopt;
+    }
+    case LsKind::AND:
+      // Table V: (t & x^hi) = t, i.e., x can be 1 wherever t is; the
+      // consistent values are those with a 1 wherever t has one.
+      if ((t & x.hi()) != t)
+      {
+        return std::nullopt;
+      }
+      return x.apply(t | rng.randomValue(w));
+    case LsKind::EQ:
+    case LsKind::ADD:
+      // Table IV-V: true; every value is consistent.
+      return pick(x, rng);
+    case LsKind::CONCAT:
+    {
+      // Table V: mcb(x, the part of t for x), the only consistent value.
+      LsValue v = concatPartOf(posX, t, ch);
+      return x.matches(v) ? std::optional<LsValue>(v) : std::nullopt;
+    }
+    case LsKind::EXTRACT:
+      // Table V: the IC, mcb(x[u:l], t); the bits outside [u:l] are free.
+      if (!extractD(x, op.hi, op.lo).matches(t))
+      {
+        return std::nullopt;
+      }
+      return x.apply(setSlice(rng.randomValue(w), op.hi, op.lo, t));
+    case LsKind::ITE:
+      // Not in the paper (plan D16). Every condition is consistent. For a
+      // branch the consistent value is t, if it matches x, as in the base
+      // rule; otherwise the move ends in a conflict (plan D11).
+      if (posX == 0)
+      {
+        return pick(x, rng);
+      }
+      return x.matches(t) ? std::optional<LsValue>(t) : std::nullopt;
+    case LsKind::ULT:
+    case LsKind::SHL:
+    case LsKind::LSHR:
+    case LsKind::MUL:
+    case LsKind::UDIV:
+    case LsKind::UREM:
+      Unimplemented() << "consistent value modulo constant bits for "
+                      << op.kind;
+    case LsKind::CONST:
+    case LsKind::VAR: break;
+  }
+  Unreachable() << "tryConsistentValue called on leaf kind " << op.kind;
 }
 
 }  // namespace
