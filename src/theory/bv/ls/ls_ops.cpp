@@ -723,6 +723,12 @@ const LsValue& boolValue(bool b)
   return b ? kTrue : kFalse;
 }
 
+/** The domain of v << k (left) or v >> k (not left) for v matching x. */
+TernaryDomain shiftDomain(const TernaryDomain& x, uint32_t k, bool left)
+{
+  return left ? shlD(x, k) : lshrD(x, k);
+}
+
 /**
  * The part of the invertibility condition that concerns the fixed bits of x.
  * Requires the base condition isInvertible(op, posX, t, ch) to hold.
@@ -771,8 +777,42 @@ bool icFixedBits(const OpInfo& op,
       }
       return x.matches(t);
     case LsKind::ULT:
+    {
+      // Table II with the erratum: (x <u s) = t needs, for t, a matching
+      // value below s (the base condition gives s != 0), and for not t, one
+      // at least s; lo is the smallest and hi the largest matching value.
+      // (s <u x) = t is symmetric.
+      const LsValue& s = *ch[1 - posX];
+      bool lt = t.isBitSet(0);
+      if (posX == 0)
+      {
+        return lt ? x.lo().unsignedLessThan(s) : !x.hi().unsignedLessThan(s);
+      }
+      return lt ? s.unsignedLessThan(x.hi()) : x.lo().unsignedLessThanEq(s);
+    }
     case LsKind::SHL:
     case LsKind::LSHR:
+    {
+      bool left = op.kind == LsKind::SHL;
+      uint32_t w = t.getSize();
+      if (posX == 0)
+      {
+        // x << s = t: Table III, mcb(x << s, t), with the exact domain of
+        // x << s.
+        return shiftDomain(x, shiftAmount(*ch[1], w), left).matches(t);
+      }
+      // s << x = t: Table III. For t != 0 the base condition fixes the
+      // amount to zeros(t) - zeros(s), which x must match. For t = 0 either
+      // s = 0, or the amount shifts all set bits of s out: it is at least
+      // w - zeros(s), and hi is the largest matching value.
+      const LsValue& s = *ch[0];
+      if (isZero(t))
+      {
+        return isZero(s)
+               || !x.hi().unsignedLessThan(LsValue(w, w - shiftZeros(s, left)));
+      }
+      return x.matches(LsValue(w, shiftZeros(t, left) - shiftZeros(s, left)));
+    }
     case LsKind::MUL:
     case LsKind::UDIV:
     case LsKind::UREM:
@@ -823,8 +863,41 @@ LsValue inverseFixedBits(const OpInfo& op,
       return a && b ? rng.randomValue(1) : boolValue(a);
     }
     case LsKind::ULT:
+    {
+      // The base ranges (FMSD'17 Table 3), drawn among the matching values.
+      const LsValue& s = *ch[1 - posX];
+      LsValue zero = LsValue::mkZero(w);
+      LsValue ones = LsValue::mkOnes(w);
+      bool lt = t.isBitSet(0);
+      if (posX == 0)
+      {
+        return lt ? pick(x, zero, dec(s), rng) : pick(x, s, ones, rng);
+      }
+      return lt ? pick(x, inc(s), ones, rng) : pick(x, zero, s, rng);
+    }
     case LsKind::SHL:
     case LsKind::LSHR:
+    {
+      bool left = op.kind == LsKind::SHL;
+      if (posX == 0)
+      {
+        // The bits of x that survive the shift are those of t shifted back,
+        // which match x; the bits shifted out are drawn and then forced to
+        // the fixed bits of x.
+        return x.apply(invShift(posX, t, ch, left, rng));
+      }
+      const LsValue& s = *ch[0];
+      if (!isZero(t))
+      {
+        return LsValue(w, shiftZeros(t, left) - shiftZeros(s, left));
+      }
+      if (isZero(s))
+      {
+        return pick(x, rng);
+      }
+      return pick(
+          x, LsValue(w, w - shiftZeros(s, left)), LsValue::mkOnes(w), rng);
+    }
     case LsKind::MUL:
     case LsKind::UDIV:
     case LsKind::UREM:
@@ -890,8 +963,72 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
       }
       return x.matches(t) ? std::optional<LsValue>(t) : std::nullopt;
     case LsKind::ULT:
+    {
+      // Table IV: not t, or x^lo != ones (x <u s'), or x^hi != 0 (s' <u x).
+      if (!t.isBitSet(0))
+      {
+        return pick(x, rng);
+      }
+      LsValue zero = LsValue::mkZero(w);
+      LsValue ones = LsValue::mkOnes(w);
+      if (posX == 0)
+      {
+        if (isOnes(x.lo()))
+        {
+          return std::nullopt;
+        }
+        return pick(x, zero, dec(ones), rng);
+      }
+      if (isZero(x.hi()))
+      {
+        return std::nullopt;
+      }
+      return pick(x, LsValue::mkOne(w), ones, rng);
+    }
     case LsKind::SHL:
     case LsKind::LSHR:
+    {
+      // Every value is consistent with t = 0: shift by w, or shift 0.
+      if (isZero(t))
+      {
+        return pick(x, rng);
+      }
+      bool left = op.kind == LsKind::SHL;
+      uint32_t zt = shiftZeros(t, left);
+      if (posX == 0)
+      {
+        // Table V: some amount k <= zeros(t) with mcb(x << k, t). Draw such
+        // an amount uniformly, then a value as the inverse value for it, so
+        // that every consistent value has a non-zero probability.
+        uint32_t n = 0;
+        for (uint32_t k = 0; k <= zt; ++k)
+        {
+          n += shiftDomain(x, k, left).matches(t);
+        }
+        if (n == 0)
+        {
+          return std::nullopt;
+        }
+        uint32_t j = rng.pickIndex(n);
+        uint32_t k = 0;
+        for (;; ++k)
+        {
+          if (shiftDomain(x, k, left).matches(t) && j-- == 0)
+          {
+            break;
+          }
+        }
+        return x.apply(randomizeLostBits(shiftBy(t, k, !left), k, left, rng));
+      }
+      // Table V (synthesized), equivalently x^lo <= zeros(t): the amounts
+      // that keep the bits of t are 0, ..., zeros(t).
+      LsValue maxAmount(w, zt);
+      if (maxAmount.unsignedLessThan(x.lo()))
+      {
+        return std::nullopt;
+      }
+      return pick(x, LsValue::mkZero(w), maxAmount, rng);
+    }
     case LsKind::MUL:
     case LsKind::UDIV:
     case LsKind::UREM:

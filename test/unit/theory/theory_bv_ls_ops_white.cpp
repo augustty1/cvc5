@@ -983,6 +983,26 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_bitwise)
 }
 
 /**
+ * The rules modulo constant bits of ULT, SHL and LSHR (goal 5 of Step 3)
+ * against brute force: every domain with a fixed bit up to 3 bits, sampled
+ * at 4 bits.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_ult_shifts)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    bool sampled = w == 4;
+    for (LsKind k : {LsKind::ULT, LsKind::SHL, LsKind::LSHR})
+    {
+      for (uint32_t pos = 0; pos < 2; ++pos)
+      {
+        checkRulesDomains({k}, pos, {w, w}, sampled);
+      }
+    }
+  }
+}
+
+/**
  * forwardDomain is sound: the value of the operator matches it whenever the
  * values of the children match their domains. Where it is documented to be
  * exact, a bit is fixed iff it is the same for all those values.
