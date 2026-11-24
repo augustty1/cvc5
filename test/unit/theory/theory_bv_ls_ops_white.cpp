@@ -1380,6 +1380,433 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_urem_multipliers_wide)
 }
 
 /**
+ * isEssential modulo constant bits against FMCAD'20 Def. 5 by brute force
+ * (goal 10 of Step 3): child i is essential iff no other child j can produce
+ * t alone with a value that matches its own domain. A child whose domain is
+ * fixed and the disabled branch of an ITE count as not invertible. Every
+ * operator up to 3 bits, every tuple of domains, every target and every
+ * assignment that matches the domains; and the example of the paper.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_is_essential)
+{
+  {
+    // n_x + n_s with t = 11, n_x = 10 and n_s in x0: n_x is essential since
+    // mcb(x0, 11 - 10) is false (FMCAD'20 Sec. IV); n_s is not, since n_x is
+    // free and 11 - 00 = 11.
+    LsValue nx(2, 0b10), ns(2, 0b00), t(2, 0b11);
+    TernaryDomain full = TernaryDomain::full(2);
+    TernaryDomain even = TernaryDomain::fromString("x0");
+    LsChildren ch{&nx, &ns};
+    LsDomains doms{&full, &even};
+    OpInfo add{LsKind::ADD};
+    ASSERT_TRUE(isEssential(add, 0, t, ch, doms));
+    ASSERT_FALSE(isEssential(add, 1, t, ch, doms));
+  }
+  for (uint32_t w = 1; w <= 3; ++w)
+  {
+    for (const auto& [op, widths] : allOps(w))
+    {
+      uint32_t n = widths.size();
+      if (n == 1)
+      {
+        continue;  // trivially essential
+      }
+      std::vector<std::vector<LsValue>> assignments = allAssignments(widths);
+      uint32_t wt = eval(op, assignments[0]).getSize();
+      for (const std::vector<TernaryDomain>& ds : allDomainTuples(widths))
+      {
+        LsDomains doms;
+        for (const TernaryDomain& d : ds)
+        {
+          doms.push_back(&d);
+        }
+        for (const std::vector<LsValue>& vals : assignments)
+        {
+          bool matches = true;
+          for (uint32_t i = 0; i < n; ++i)
+          {
+            matches = matches && ds[i].matches(vals[i]);
+          }
+          if (!matches)
+          {
+            continue;
+          }
+          LsChildren ch;
+          for (const LsValue& v : vals)
+          {
+            ch.push_back(&v);
+          }
+          for (uint32_t tv = 0; tv < (1u << wt); ++tv)
+          {
+            LsValue t(wt, tv);
+            // Which children can produce t alone within their domain.
+            std::vector<bool> invertible(n, false);
+            for (uint32_t j = 0; j < n; ++j)
+            {
+              if (ds[j].isFixed()
+                  || (op.kind == LsKind::ITE && j > 0
+                      && vals[0].isBitSet(0) != (j == 1)))
+              {
+                continue;
+              }
+              for (uint32_t yv = 0; yv < (1u << widths[j]); ++yv)
+              {
+                std::vector<LsValue> valsy = vals;
+                valsy[j] = LsValue(widths[j], yv);
+                if (ds[j].matches(valsy[j]) && eval(op, valsy) == t)
+                {
+                  invertible[j] = true;
+                  break;
+                }
+              }
+            }
+            for (uint32_t i = 0; i < n; ++i)
+            {
+              bool expected = true;
+              for (uint32_t j = 0; j < n; ++j)
+              {
+                expected = expected && (j == i || !invertible[j]);
+              }
+              std::stringstream ctx;
+              ctx << opToString(op, widths) << " i=" << i << " t=" << t;
+              for (uint32_t j = 0; j < n; ++j)
+              {
+                ctx << " ch" << j << "=" << vals[j] << "/" << ds[j];
+              }
+              ASSERT_EQ(isEssential(op, i, t, ch, doms), expected) << ctx.str();
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * The rules modulo constant bits of every operator at 6 bits, on random cases
+ * compared with brute force (goal 10 of Step 3). At 6 bits the bounded
+ * searches of UDIV and UREM still see every candidate, so every condition is
+ * exact: isInvertible holds iff some value matching x is a solution, and
+ * tryConsistentValue returns a value iff some value matching x is
+ * consistent. The values are correct, they cover all solutions and all
+ * consistent values when there are at most 8, and two generators with the
+ * same seed give the same values.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_6bits)
+{
+  const uint32_t w = 6;
+  LsRng gen(67);
+  uint32_t numCases = 0;
+  uint32_t numInvertible = 0;
+  uint32_t numCoverage = 0;
+  std::vector<std::pair<OpInfo, std::vector<uint32_t>>> ops;
+  for (const auto& [op, widths] : allOps(w))
+  {
+    // A third of the extracts is enough; the others are covered up to 4 bits.
+    if (op.kind != LsKind::EXTRACT || (op.hi + op.lo) % 3 == 0)
+    {
+      ops.push_back({op, widths});
+    }
+  }
+  for (const auto& [op, widths] : ops)
+  {
+    uint32_t n = widths.size();
+    for (uint32_t posX = 0; posX < n; ++posX)
+    {
+      uint32_t wx = widths[posX];
+      bool iteBranch = op.kind == LsKind::ITE && posX > 0;
+      for (uint32_t r = 0; r < 40; ++r)
+      {
+        // A domain with some fixed bit; the children with matching or random
+        // values; t the value of the operator half of the time.
+        LsValue fixed = gen.randomValue(wx);
+        if (r % 3 == 1)
+        {
+          fixed = fixed & gen.randomValue(wx);
+        }
+        else if (r % 3 == 2)
+        {
+          fixed = fixed | gen.randomValue(wx);
+        }
+        if (isZero(fixed))
+        {
+          fixed = LsValue::mkOne(wx);
+        }
+        LsValue bits = gen.randomValue(wx) & fixed;
+        TernaryDomain x(bits, bits | ~fixed);
+        std::vector<LsValue> vals;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+          vals.push_back(i == posX ? x.apply(gen.randomValue(wx))
+                                   : gen.randomValue(widths[i]));
+        }
+        LsValue t = r % 2 == 0 ? eval(op, vals)
+                               : gen.randomValue(eval(op, vals).getSize());
+        LsChildren ch;
+        for (const LsValue& v : vals)
+        {
+          ch.push_back(&v);
+        }
+        std::stringstream ctx;
+        ctx << opToString(op, widths) << " pos=" << posX << " x=" << x
+            << " t=" << t;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+          ctx << " ch" << i << "=" << vals[i];
+        }
+
+        // Brute force: the solutions and the consistent values matching x.
+        std::set<uint32_t> solutions;
+        std::set<uint32_t> consistent;
+        for (uint32_t xv = 0; xv < (1u << wx); ++xv)
+        {
+          LsValue xval(wx, xv);
+          if (!x.matches(xval))
+          {
+            continue;
+          }
+          std::vector<LsValue> valsx = vals;
+          valsx[posX] = xval;
+          if (eval(op, valsx) == t)
+          {
+            solutions.insert(xv);
+          }
+          if (iteBranch)
+          {
+            continue;
+          }
+          // Consistent: some values of the other children give t.
+          std::vector<uint32_t> others;
+          for (uint32_t i = 0; i < n; ++i)
+          {
+            if (i != posX)
+            {
+              others.push_back(i);
+            }
+          }
+          uint32_t combos = 1;
+          for (uint32_t i : others)
+          {
+            combos <<= widths[i];
+          }
+          for (uint32_t c = 0; c < combos; ++c)
+          {
+            uint32_t rest = c;
+            for (uint32_t i : others)
+            {
+              valsx[i] = LsValue(widths[i], rest & ((1u << widths[i]) - 1));
+              rest >>= widths[i];
+            }
+            if (eval(op, valsx) == t)
+            {
+              consistent.insert(xv);
+              break;
+            }
+          }
+        }
+        if (iteBranch && x.matches(t))
+        {
+          consistent.insert(t.toInteger().getUnsignedInt());  // plan D11
+        }
+        bool expectedIc = !solutions.empty();
+        if (iteBranch && vals[0].isBitSet(0) != (posX == 1))
+        {
+          expectedIc = false;  // the disabled branch
+        }
+        ASSERT_EQ(isInvertible(op, posX, t, ch, x), expectedIc) << ctx.str();
+        ++numCases;
+        numInvertible += expectedIc;
+
+        LsRng r1(r), r2(r);
+        std::set<uint32_t> seenInv;
+        std::set<uint32_t> seenCons;
+        uint32_t samples =
+            solutions.size() <= 8 && consistent.size() <= 8 ? 256 : 16;
+        for (uint32_t i = 0; i < samples; ++i)
+        {
+          if (expectedIc)
+          {
+            LsValue v = inverseValue(op, posX, t, ch, x, r1);
+            ASSERT_EQ(v, inverseValue(op, posX, t, ch, x, r2)) << ctx.str();
+            ASSERT_TRUE(solutions.count(v.toInteger().getUnsignedInt()))
+                << ctx.str() << " inverse=" << v;
+            seenInv.insert(v.toInteger().getUnsignedInt());
+          }
+          std::optional<LsValue> c = tryConsistentValue(op, posX, t, ch, x, r1);
+          ASSERT_EQ(c, tryConsistentValue(op, posX, t, ch, x, r2)) << ctx.str();
+          ASSERT_EQ(c.has_value(), !consistent.empty()) << ctx.str();
+          if (c)
+          {
+            ASSERT_TRUE(consistent.count(c->toInteger().getUnsignedInt()))
+                << ctx.str() << " consistent=" << *c;
+            seenCons.insert(c->toInteger().getUnsignedInt());
+          }
+        }
+        if (samples == 256)
+        {
+          ++numCoverage;
+          if (expectedIc)
+          {
+            ASSERT_EQ(seenInv, solutions) << ctx.str() << " (inverse coverage)";
+          }
+          ASSERT_EQ(seenCons, consistent)
+              << ctx.str() << " (consistent coverage)";
+        }
+      }
+    }
+  }
+  RecordProperty("cases", numCases);
+  RecordProperty("invertible", numInvertible);
+  RecordProperty("coverage", numCoverage);
+}
+
+/**
+ * The rules modulo constant bits with values of more than 64 bits, which take
+ * another code path in LsValue (goal 10 of Step 3), at 65 and 128 bits on
+ * random cases. A value returned by inverseValue matches x and produces t. A
+ * value returned by tryConsistentValue matches x and is consistent, which is
+ * checked with the base invertibility condition of the other child: some
+ * value of it gives t (for unary operators: the value gives t). When t is the
+ * current value of the operator, the current value of x is a solution, so the
+ * exact conditions (all but UREM) must hold and a consistent value must exist
+ * (all but the stage-based UDIV at position 0 and the ITE branches).
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_wide_values)
+{
+  LsRng gen(71);
+  uint32_t numCases = 0;
+  uint32_t numInvertible = 0;
+  uint32_t numConsistent = 0;
+  for (uint32_t w : {65u, 128u})
+  {
+    std::vector<std::pair<OpInfo, std::vector<uint32_t>>> ops;
+    ops.push_back({{LsKind::NOT}, {w}});
+    for (LsKind k : {LsKind::AND,
+                     LsKind::EQ,
+                     LsKind::ULT,
+                     LsKind::ADD,
+                     LsKind::MUL,
+                     LsKind::UDIV,
+                     LsKind::UREM,
+                     LsKind::SHL,
+                     LsKind::LSHR,
+                     LsKind::CONCAT})
+    {
+      ops.push_back({{k}, {w, w}});
+    }
+    ops.push_back({{LsKind::CONCAT}, {w, 3}});
+    ops.push_back({{LsKind::EXTRACT, w - 1, 0}, {w}});
+    ops.push_back({{LsKind::EXTRACT, w - 2, 60}, {w}});
+    ops.push_back({{LsKind::EXTRACT, 70 % w, 3}, {w}});
+    ops.push_back({{LsKind::ITE}, {1, w, w}});
+    for (const auto& [op, widths] : ops)
+    {
+      uint32_t n = widths.size();
+      for (uint32_t posX = 0; posX < n; ++posX)
+      {
+        uint32_t wx = widths[posX];
+        for (uint32_t r = 0; r < 60; ++r)
+        {
+          LsValue fixed = gen.randomValue(wx);
+          if (r % 3 == 1)
+          {
+            fixed = fixed & gen.randomValue(wx) & gen.randomValue(wx);
+          }
+          if (isZero(fixed))
+          {
+            fixed = LsValue::mkOne(wx);
+          }
+          LsValue bits = gen.randomValue(wx) & fixed;
+          TernaryDomain x(bits, bits | ~fixed);
+          std::vector<LsValue> vals;
+          for (uint32_t i = 0; i < n; ++i)
+          {
+            LsValue v = gen.randomValue(widths[i]);
+            // Small values make division, remainder and shifts interesting.
+            if (r % 4 == 3 && widths[i] > 1)
+            {
+              v = v.logicalRightShift(widths[i] - 8);
+            }
+            vals.push_back(i == posX ? x.apply(v) : v);
+          }
+          bool tIsCurrent = r % 2 == 0;
+          LsValue t = tIsCurrent ? eval(op, vals)
+                                 : gen.randomValue(eval(op, vals).getSize());
+          LsChildren ch;
+          for (const LsValue& v : vals)
+          {
+            ch.push_back(&v);
+          }
+          std::stringstream ctx;
+          ctx << opToString(op, widths) << " pos=" << posX << " x=" << x
+              << " t=" << t;
+
+          bool ic = isInvertible(op, posX, t, ch, x);
+          ++numCases;
+          numInvertible += ic;
+          bool iteBranch = op.kind == LsKind::ITE && posX > 0;
+          bool enabled = !iteBranch || vals[0].isBitSet(0) == (posX == 1);
+          if (tIsCurrent && op.kind != LsKind::UREM && enabled)
+          {
+            ASSERT_TRUE(ic) << ctx.str() << " (the current value solves)";
+          }
+          if (ic)
+          {
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+              LsValue v = inverseValue(op, posX, t, ch, x, d_rng);
+              std::vector<LsValue> valsx = vals;
+              valsx[posX] = v;
+              ASSERT_TRUE(x.matches(v)) << ctx.str() << " inverse=" << v;
+              ASSERT_EQ(eval(op, valsx), t) << ctx.str() << " inverse=" << v;
+            }
+          }
+          std::optional<LsValue> c =
+              tryConsistentValue(op, posX, t, ch, x, d_rng);
+          if (tIsCurrent && !iteBranch
+              && !(op.kind == LsKind::UDIV && posX == 0))
+          {
+            ASSERT_TRUE(c.has_value()) << ctx.str() << " (x is consistent)";
+          }
+          if (!c)
+          {
+            continue;
+          }
+          ++numConsistent;
+          ASSERT_TRUE(x.matches(*c)) << ctx.str() << " consistent=" << *c;
+          std::vector<LsValue> valsc = vals;
+          valsc[posX] = *c;
+          LsChildren chc;
+          for (const LsValue& v : valsc)
+          {
+            chc.push_back(&v);
+          }
+          if (n == 1)
+          {
+            ASSERT_EQ(eval(op, valsc), t) << ctx.str() << " consistent=" << *c;
+          }
+          else if (iteBranch)
+          {
+            ASSERT_EQ(*c, t) << ctx.str();
+          }
+          else if (op.kind != LsKind::ITE)
+          {
+            ASSERT_TRUE(isInvertible(op, 1 - posX, t, chc))
+                << ctx.str() << " consistent=" << *c;
+          }
+        }
+      }
+    }
+  }
+  RecordProperty("cases", numCases);
+  RecordProperty("invertible", numInvertible);
+  RecordProperty("consistent", numConsistent);
+  // Both outcomes occur often enough to exercise the values.
+  ASSERT_GT(numInvertible, numCases / 3);
+  ASSERT_GT(numConsistent, numCases / 2);
+}
+
+/**
  * forwardDomain is sound: the value of the operator matches it whenever the
  * values of the children match their domains. Where it is documented to be
  * exact, a bit is fixed iff it is the same for all those values.
