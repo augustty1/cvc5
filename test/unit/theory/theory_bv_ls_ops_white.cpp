@@ -1264,6 +1264,122 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_urem_divisors_wide)
 }
 
 /**
+ * The rules modulo constant bits of x mod s = t (UREM at position 0, goal 9
+ * of Step 3) against brute force: every domain with a fixed bit up to 3 bits,
+ * sampled at 4 bits. Up to 4 bits there are at most 16 multipliers, so the
+ * check is exact here.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_urem_multipliers)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    checkRulesDomains({LsKind::UREM}, 0, {w, w}, w == 4);
+  }
+}
+
+/**
+ * x mod s = t at 16 bits, where the solutions s * k + t can be many.
+ *
+ * With s = 3, t = 1 and x >= 2^15 there are about 11000 solutions: the
+ * inverse values are drawn by uniform multipliers, so 300 calls return many
+ * different solutions, not only the first one the search finds.
+ *
+ * With s = 7, t = 3 and the low byte of x fixed to 42, the solutions are
+ * sparse (x = 256 a + 42 with a = 6 mod 7): the search jumps from one
+ * matching value to the next and finds them.
+ *
+ * On random domains and targets, the check never says yes wrongly, says yes
+ * whenever a solution exists in all but a few cases (the search is bounded),
+ * and the inverse values are always solutions that match x.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_urem_multipliers_wide)
+{
+  const uint32_t w = 16;
+  OpInfo urem{LsKind::UREM};
+  {
+    TernaryDomain x(LsValue(w, 0x8000), LsValue::mkOnes(w));
+    LsValue s(w, 3), t(w, 1), cur(w, 0x8000);
+    LsChildren ch{&cur, &s};
+    ASSERT_TRUE(isInvertible(urem, 0, t, ch, x));
+    std::set<uint64_t> seen;
+    for (uint32_t i = 0; i < 300; ++i)
+    {
+      LsValue v = inverseValue(urem, 0, t, ch, x, d_rng);
+      uint64_t vv = v.toInteger().getUnsignedLong();
+      ASSERT_TRUE(x.matches(v) && vv % 3 == 1) << v;
+      seen.insert(vv);
+    }
+    ASSERT_GT(seen.size(), 250u);
+  }
+  {
+    TernaryDomain x(LsValue(w, 42), LsValue(w, 0xff2a));
+    LsValue s(w, 7), t(w, 3), cur(w, 42);
+    LsChildren ch{&cur, &s};
+    ASSERT_TRUE(isInvertible(urem, 0, t, ch, x));
+    for (uint32_t i = 0; i < 100; ++i)
+    {
+      LsValue v = inverseValue(urem, 0, t, ch, x, d_rng);
+      uint64_t vv = v.toInteger().getUnsignedLong();
+      ASSERT_TRUE(vv % 256 == 42 && vv % 7 == 3) << v;
+    }
+  }
+
+  LsRng gen(61);
+  uint32_t solvable = 0;
+  uint32_t found = 0;
+  for (uint32_t r = 0; r < 500; ++r)
+  {
+    // A quarter, half or three quarters of the bits fixed.
+    LsValue fixed = gen.randomValue(w);
+    if (r % 3 == 1)
+    {
+      fixed = fixed & gen.randomValue(w);
+    }
+    else if (r % 3 == 2)
+    {
+      fixed = fixed | gen.randomValue(w);
+    }
+    LsValue bits = gen.randomValue(w) & fixed;
+    TernaryDomain x(bits, bits | ~fixed);
+    LsValue s =
+        r % 2 == 0 ? LsValue(w, 2 + gen.pickIndex(300)) : gen.randomValue(w);
+    LsValue t = gen.randomValue(w).unsignedRemTotal(s);
+    LsValue cur = x.apply(gen.randomValue(w));
+    LsChildren ch{&cur, &s};
+    uint64_t sv = s.toInteger().getUnsignedLong();
+    uint64_t tv = t.toInteger().getUnsignedLong();
+    uint64_t lo = x.lo().toInteger().getUnsignedLong();
+    uint64_t hi = x.hi().toInteger().getUnsignedLong();
+    bool exists = false;
+    for (uint64_t v = 0; v < (uint64_t(1) << w) && !exists; ++v)
+    {
+      exists = (v & hi) == v && (v | lo) == v && (sv == 0 ? v : v % sv) == tv;
+    }
+    std::stringstream ctx;
+    ctx << "x=" << x << " s=" << s << " t=" << t;
+    bool ic = isInvertible(urem, 0, t, ch, x);
+    ASSERT_TRUE(!ic || exists) << ctx.str() << " (wrong yes)";
+    solvable += exists;
+    found += ic;
+    if (ic)
+    {
+      for (uint32_t i = 0; i < 10; ++i)
+      {
+        LsValue v = inverseValue(urem, 0, t, ch, x, d_rng);
+        uint64_t vv = v.toInteger().getUnsignedLong();
+        ASSERT_TRUE(x.matches(v) && (sv == 0 ? vv : vv % sv) == tv)
+            << ctx.str() << " inverse=" << v;
+      }
+    }
+  }
+  RecordProperty("solvable", solvable);
+  RecordProperty("found", found);
+  ASSERT_GT(solvable, 100u);
+  // The bounded search misses at most a few of the solvable cases.
+  ASSERT_GE(found + solvable / 50, solvable);
+}
+
+/**
  * forwardDomain is sound: the value of the operator matches it whenever the
  * values of the children match their domains. Where it is documented to be
  * exact, a bit is fixed iff it is the same for all those values.

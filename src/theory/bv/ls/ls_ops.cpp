@@ -11,6 +11,7 @@
 #include "theory/bv/ls/ls_ops.h"
 
 #include <ostream>
+#include <utility>
 
 #include "base/check.h"
 
@@ -129,6 +130,11 @@ constexpr uint32_t kSearchLimit = 100;
 constexpr uint32_t kProbUremInvSample = 100;
 /** UREM pos 1 inverse: the number of values drawn there. */
 constexpr uint32_t kUremDivisorSamples = 16;
+/**
+ * UREM pos 0 inverse: the number of uniform multipliers tried before the
+ * deterministic search, so that every solution keeps a non-zero probability.
+ */
+constexpr uint32_t kUremMultiplierTries = 32;
 
 }  // namespace
 
@@ -974,6 +980,80 @@ bool forEachFoundDivisor(const TernaryDomain& x,
   return false;
 }
 
+/** Return true if v < k as unsigned integers, whatever the width of v. */
+bool lessThan(const LsValue& v, uint32_t k)
+{
+  uint32_t w = v.getSize();
+  if (w < 32 && (uint64_t(1) << w) <= k)
+  {
+    return true;  // every value of width w is below k
+  }
+  return v.unsignedLessThan(LsValue(w, k));
+}
+
+/**
+ * For x mod s = t with s != 0 and t < s, whose solutions are s * k + t for k =
+ * 0, ..., (ones - t) / s: return the range [klo, khi] of the multipliers k
+ * whose solution lies in [x^lo, x^hi], or nothing if it is empty. s * k + t
+ * does not overflow for k <= khi.
+ */
+std::optional<std::pair<LsValue, LsValue>> uremMultipliers(
+    const TernaryDomain& x, const LsValue& s, const LsValue& t)
+{
+  if (x.hi().unsignedLessThan(t))
+  {
+    return std::nullopt;
+  }
+  LsValue khi = (x.hi() - t).unsignedDivTotal(s);
+  // klo = ceil((x^lo - t) / s) if x^lo > t, else 0.
+  LsValue klo = LsValue::mkZero(t.getSize());
+  if (t.unsignedLessThan(x.lo()))
+  {
+    klo = inc(dec(x.lo() - t).unsignedDivTotal(s));
+  }
+  if (khi.unsignedLessThan(klo))
+  {
+    return std::nullopt;
+  }
+  return std::make_pair(klo, khi);
+}
+
+/**
+ * For x mod s = t as in uremMultipliers: return the smallest solution s * k +
+ * t that matches x with k in [k, khi], trying at most kSearchLimit
+ * candidates. From a candidate that does not match, the search jumps to the
+ * first multiplier whose solution is at least the next matching value, so it
+ * skips the values that x excludes. Nothing if there is no such solution, or
+ * if the search runs out of steps, which may then miss one.
+ */
+std::optional<LsValue> uremFirstSolution(const TernaryDomain& x,
+                                         const LsValue& s,
+                                         const LsValue& t,
+                                         LsValue k,
+                                         const LsValue& khi)
+{
+  for (uint32_t i = 0; i < kSearchLimit; ++i)
+  {
+    LsValue v = s * k + t;
+    std::optional<LsValue> m = minMatchingGeq(x, v);
+    if (!m)
+    {
+      return std::nullopt;  // no matching value >= v
+    }
+    if (*m == v)
+    {
+      return v;
+    }
+    // The first multiplier whose solution is at least m: ceil((m - t) / s).
+    k = inc(dec(*m - t).unsignedDivTotal(s));
+    if (khi.unsignedLessThan(k))
+    {
+      return std::nullopt;
+    }
+  }
+  return std::nullopt;
+}
+
 /**
  * The part of the invertibility condition that concerns the fixed bits of x.
  * Requires the base condition isInvertible(op, posX, t, ch) to hold.
@@ -1099,7 +1179,35 @@ bool icFixedBits(const OpInfo& op,
     {
       if (posX == 0)
       {
-        Unimplemented() << "invertibility modulo constant bits for UREM at 0";
+        // x mod s = t: Table III. The base condition gives s = 0 or t < s.
+        // For s = 0 (x mod 0 = x) the only solution is t. Otherwise the
+        // existential asks for a multiplier k with s * k + t matching x; it
+        // is decided in stages, of which only the last is bounded.
+        const LsValue& s = *ch[1];
+        if (isZero(s))
+        {
+          return x.matches(t);
+        }
+        // Every solution has the low ctz(s) bits of t: exact no.
+        uint32_t c = ctz(s);
+        if (c > 0 && !extractD(x, c - 1, 0).matches(t.extract(c - 1, 0)))
+        {
+          return false;
+        }
+        // s = 2^c: every value with those low bits is a solution: exact yes.
+        if (popcount(s) == 1)
+        {
+          return true;
+        }
+        // No multiplier puts the solution in [x^lo, x^hi]: exact no. Else
+        // the search, exact if it ends within kSearchLimit steps. A wrong no
+        // only sends the step to tryConsistentValue, whose values include
+        // every inverse value.
+        std::optional<std::pair<LsValue, LsValue>> range =
+            uremMultipliers(x, s, t);
+        return range
+               && uremFirstSolution(x, s, t, range->first, range->second)
+                      .has_value();
       }
       // s mod x = t: Table III. The base condition holds, so s >= t.
       const LsValue& s = *ch[0];
@@ -1257,7 +1365,58 @@ LsValue inverseFixedBits(const OpInfo& op,
     {
       if (posX == 0)
       {
-        Unimplemented() << "inverse value modulo constant bits for UREM at 0";
+        const LsValue& s = *ch[1];
+        if (isZero(s))
+        {
+          return t;
+        }
+        uint32_t c = ctz(s);
+        if (popcount(s) == 1)
+        {
+          // Every value with the low c bits of t: draw the others.
+          LsValue v = pick(x, rng);
+          return c == 0 ? v : setSlice(v, c - 1, 0, t.extract(c - 1, 0));
+        }
+        std::optional<std::pair<LsValue, LsValue>> range =
+            uremMultipliers(x, s, t);
+        Assert(range);
+        const auto& [klo, khi] = *range;
+        if (lessThan(khi - klo, kSearchLimit))
+        {
+          // Few multipliers: a uniform solution among all of them.
+          uint32_t count = 0;
+          for (LsValue k = klo;; k = inc(k))
+          {
+            count += x.matches(s * k + t);
+            if (k == khi)
+            {
+              break;
+            }
+          }
+          Assert(count > 0);
+          uint32_t j = rng.pickIndex(count);
+          for (LsValue k = klo;; k = inc(k))
+          {
+            LsValue v = s * k + t;
+            if (x.matches(v) && j-- == 0)
+            {
+              return v;
+            }
+          }
+        }
+        // Uniform multipliers, so that every solution has a non-zero
+        // probability, then the first solution, which isInvertible found.
+        for (uint32_t i = 0; i < kUremMultiplierTries; ++i)
+        {
+          LsValue v = s * rng.randomInRange(klo, khi) + t;
+          if (x.matches(v))
+          {
+            return v;
+          }
+        }
+        std::optional<LsValue> v = uremFirstSolution(x, s, t, klo, khi);
+        Assert(v);
+        return *v;
       }
       const LsValue& s = *ch[0];
       LsValue zero = LsValue::mkZero(w);
@@ -1470,8 +1629,20 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
     {
       if (posX == 0)
       {
-        Unimplemented()
-            << "consistent value modulo constant bits for UREM at 0";
+        // x mod s' = t: Table V. The consistent values are t (s' = 0) and,
+        // if 2t + 1 does not overflow, every x > 2t (s' = x - t > t).
+        bool tOk = x.matches(t);
+        bool aboveOk = !isOnes(t) && !uaddOverflow(t, inc(t))
+                       && !x.hi().unsignedLessThan(t + inc(t));
+        if (!tOk && !aboveOk)
+        {
+          return std::nullopt;
+        }
+        if (tOk && (!aboveOk || rng.pickWithProb(kProbUremConsT)))
+        {
+          return t;
+        }
+        return pick(x, t + inc(t), LsValue::mkOnes(w), rng);
       }
       // s' mod x = t: Table V (synthesized), equivalently x^lo = 0 or x^hi >
       // t. The consistent values are 0 (s' = t) and every x > t (s' = t), as
