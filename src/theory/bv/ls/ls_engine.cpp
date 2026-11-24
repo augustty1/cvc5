@@ -11,6 +11,7 @@
 #include "theory/bv/ls/ls_engine.h"
 
 #include <algorithm>
+#include <unordered_map>
 
 #include "base/check.h"
 
@@ -176,7 +177,8 @@ void LsEngine::prepareRoots()
   d_coneEpoch = 0;
 
   // The nodes reachable from the roots.
-  std::vector<bool> reached(size, false);
+  std::vector<bool>& reached = d_reachable;
+  reached.assign(size, false);
   std::vector<uint32_t> stack;
   for (uint32_t r : d_roots)
   {
@@ -435,6 +437,51 @@ bool LsEngine::updateCone(uint32_t leaf, const LsValue& v)
   }
   d_stats.updates += d_cone.size();
   return true;
+}
+
+LsValue LsEngine::currentValue(uint32_t id) const
+{
+  auto upToDate = [this](uint32_t n) {
+    return d_nodes[n].children.empty()
+           || (!d_rootsChanged && n < d_reachable.size() && d_reachable[n]);
+  };
+  if (upToDate(id))
+  {
+    return d_nodes[id].value;
+  }
+  // Evaluate the nodes that are not up to date, children first.
+  std::unordered_map<uint32_t, LsValue> computed;
+  std::vector<std::pair<uint32_t, bool>> stack = {{id, false}};
+  while (!stack.empty())
+  {
+    auto [n, childrenDone] = stack.back();
+    stack.pop_back();
+    if (computed.find(n) != computed.end())
+    {
+      continue;
+    }
+    const Node& node = d_nodes[n];
+    if (!childrenDone)
+    {
+      stack.emplace_back(n, true);
+      for (uint32_t c : node.children)
+      {
+        if (!upToDate(c) && computed.find(c) == computed.end())
+        {
+          stack.emplace_back(c, false);
+        }
+      }
+      continue;
+    }
+    LsChildren ch;
+    for (uint32_t c : node.children)
+    {
+      // References to the elements of an unordered_map stay valid.
+      ch.push_back(upToDate(c) ? &d_nodes[c].value : &computed.at(c));
+    }
+    computed.emplace(n, evaluate(node.op, ch));
+  }
+  return computed.at(id);
 }
 
 bool LsEngine::checkInvariants() const

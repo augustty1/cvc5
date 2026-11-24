@@ -440,6 +440,33 @@ TEST_F(TestTheoryWhiteBvLsEngine, const_bits_conflict)
 }
 
 /**
+ * currentValue: the moves keep only the leaves and the nodes reachable from
+ * the roots up to date; any other node is evaluated from the leaves. (The
+ * adapter reads model values this way: the node of a purification skolem
+ * need not be reachable.)
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, current_value)
+{
+  for (bool constBits : {false, true})
+  {
+    LsConfig config;
+    config.constBits = constBits;
+    LsEngine e(1, config);
+    uint32_t x = mkVar(e, 4);
+    uint32_t y = mkVar(e, 4);
+    uint32_t sum = e.mkOp(LsKind::ADD, {x, y});     // not reachable
+    uint32_t prod = e.mkOp(LsKind::MUL, {sum, x});  // not reachable
+    e.setRoots({e.mkOp(LsKind::EQ, {x, mkConst(e, 4, 5)})});
+    ASSERT_EQ(e.solve(100, 0), LsResult::SAT);
+    ASSERT_EQ(e.value(x), LsValue(4, 5u));
+    LsValue expected = (e.value(x) + e.value(y)) * e.value(x);
+    ASSERT_EQ(e.currentValue(prod), expected);
+    ASSERT_EQ(e.currentValue(sum), e.value(x) + e.value(y));
+    ASSERT_EQ(e.currentValue(x), LsValue(4, 5u));
+  }
+}
+
+/**
  * Without constants every domain is the one without fixed bits, so with or
  * without constant bits the rules are the base rules and the runs are the
  * same, draw for draw.

@@ -135,7 +135,9 @@ Node BvLsSolver::getValue(TNode n) const
   {
     return Node::null();
   }
-  const LsValue& v = d_engine.value(it->second);
+  // The node of a purification skolem is the term it purifies, which need not
+  // be reachable from the roots, so it is evaluated rather than read.
+  LsValue v = d_engine.currentValue(it->second);
   NodeManager* nm = nodeManager();
   if (n.getType().isBoolean())
   {

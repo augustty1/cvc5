@@ -143,8 +143,20 @@ class LsEngine
                  uint64_t maxUpdates,
                  const std::function<bool()>& terminate = nullptr);
 
-  /** Return the current value of node id. */
+  /**
+   * Return the stored value of node id. The moves keep it up to date only
+   * for leaves and for the nodes reachable from the roots; see currentValue.
+   */
   const LsValue& value(uint32_t id) const { return d_nodes[id].value; }
+
+  /**
+   * Return the value of node id under the current values of the leaves. For a
+   * leaf or a node reachable from the prepared roots this is value(id); for
+   * any other node it is computed from the leaves, since the moves do not
+   * update it. Such a node is, e.g., the definition of a purification skolem
+   * whose uses were all simplified to constants.
+   */
+  LsValue currentValue(uint32_t id) const;
 
   /** Return true if node id is a constant leaf. */
   bool isConst(uint32_t id) const { return d_nodes[id].isConst; }
@@ -229,6 +241,8 @@ class LsEngine
 
   std::vector<uint32_t> d_roots;
   bool d_rootsChanged = false;
+  /** The nodes reachable from the roots when they were last prepared. */
+  std::vector<bool> d_reachable;
   std::vector<bool> d_isRoot;
   /** The roots whose value is 0, with the position of each in d_unsatPos. */
   std::vector<uint32_t> d_unsatRoots;
