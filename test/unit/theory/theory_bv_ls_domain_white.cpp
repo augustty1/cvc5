@@ -92,7 +92,7 @@ class TestTheoryWhiteBvLsDomain : public TestInternal
                             bool exact,
                             const std::string& ctx)
   {
-    ASSERT_TRUE(d.isValid()) << ctx;
+    ASSERT_TRUE(TernaryDomain::isValid(d.lo(), d.hi())) << ctx;
     ASSERT_FALSE(values.empty()) << ctx;
     uint32_t w = d.getSize();
     for (uint32_t i = 0; i < w; ++i)
@@ -147,24 +147,20 @@ TEST_F(TestTheoryWhiteBvLsDomain, paper_examples)
 {
   // 1xxx is <1000, 1111>.
   TernaryDomain x = TernaryDomain::fromString("1xxx");
-  ASSERT_EQ(x.lo, LsValue(4, 0b1000));
-  ASSERT_EQ(x.hi, LsValue(4, 0b1111));
-  ASSERT_TRUE(x.isValid());
+  ASSERT_EQ(x.lo(), LsValue(4, 0b1000));
+  ASSERT_EQ(x.hi(), LsValue(4, 0b1111));
   ASSERT_EQ(x.toString(), "1xxx");
 
   // <1100, 1000> is invalid.
-  TernaryDomain bad;
-  bad.lo = LsValue(4, 0b1100);
-  bad.hi = LsValue(4, 0b1000);
-  ASSERT_FALSE(bad.isValid());
+  ASSERT_FALSE(TernaryDomain::isValid(LsValue(4, 0b1100), LsValue(4, 0b1000)));
   // So are bounds of different widths.
-  bad.lo = LsValue(3, 0);
-  ASSERT_FALSE(bad.isValid());
+  ASSERT_FALSE(TernaryDomain::isValid(LsValue(3, 0), LsValue(4, 0b1000)));
+  ASSERT_TRUE(TernaryDomain::isValid(LsValue(4, 0b1000), LsValue(4, 0b1111)));
 
   // x = 1x: 11 and 10 match, 01 does not.
   TernaryDomain y = TernaryDomain::fromString("1x");
-  ASSERT_EQ(y.lo, LsValue(2, 0b10));
-  ASSERT_EQ(y.hi, LsValue(2, 0b11));
+  ASSERT_EQ(y.lo(), LsValue(2, 0b10));
+  ASSERT_EQ(y.hi(), LsValue(2, 0b11));
   ASSERT_TRUE(y.matches(LsValue(2, 0b11)));
   ASSERT_TRUE(y.matches(LsValue(2, 0b10)));
   ASSERT_FALSE(y.matches(LsValue(2, 0b01)));
@@ -187,7 +183,7 @@ TEST_F(TestTheoryWhiteBvLsDomain, queries_exhaustive)
     for (const TernaryDomain& x : doms)
     {
       std::string ctx = x.toString();
-      ASSERT_TRUE(x.isValid()) << ctx;
+      ASSERT_TRUE(TernaryDomain::isValid(x.lo(), x.hi())) << ctx;
       ASSERT_EQ(x.getSize(), w) << ctx;
       ASSERT_EQ(TernaryDomain::fromString(x.toString()), x) << ctx;
 
@@ -208,8 +204,8 @@ TEST_F(TestTheoryWhiteBvLsDomain, queries_exhaustive)
       std::vector<uint32_t> m = matching(x);
       ASSERT_EQ(m.size(), 1u << numFree) << ctx;
       // lo is the smallest and hi the largest matching value.
-      ASSERT_EQ(toUint(x.lo), m.front()) << ctx;
-      ASSERT_EQ(toUint(x.hi), m.back()) << ctx;
+      ASSERT_EQ(toUint(x.lo()), m.front()) << ctx;
+      ASSERT_EQ(toUint(x.hi()), m.back()) << ctx;
       std::set<uint32_t> mset(m.begin(), m.end());
       for (uint32_t v = 0; v < (1u << w); ++v)
       {
@@ -615,8 +611,8 @@ TEST_F(TestTheoryWhiteBvLsDomain, wide)
           ASSERT_EQ(expand(x, LsValue(x.numFree(), i)), m[i]) << x;
         }
       }
-      ASSERT_EQ(x.lo, m.front());
-      ASSERT_EQ(x.hi, m.back());
+      ASSERT_EQ(x.lo(), m.front());
+      ASSERT_EQ(x.hi(), m.back());
 
       for (uint32_t u1 = 0; u1 < (1u << ws); ++u1)
       {
@@ -672,7 +668,7 @@ TEST_F(TestTheoryWhiteBvLsDomain, wide)
                 ASSERT_EQ(seen.size(), expected) << x << " a=" << a;
               }
             }
-            if (!x.isFixed() || x.lo != a)
+            if (!x.isFixed() || x.lo() != a)
             {
               for (uint32_t i = 0; i < 16; ++i)
               {

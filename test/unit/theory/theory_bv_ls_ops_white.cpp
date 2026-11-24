@@ -826,7 +826,7 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain)
           ctx << " " << d;
         }
         TernaryDomain fd = forwardDomain(op, doms);
-        ASSERT_TRUE(fd.isValid()) << ctx.str();
+        ASSERT_TRUE(TernaryDomain::isValid(fd.lo(), fd.hi())) << ctx.str();
 
         // The values of the operator over the matching children values.
         std::set<uint32_t> image;

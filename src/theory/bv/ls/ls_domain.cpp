@@ -19,9 +19,11 @@ namespace theory {
 namespace bv {
 namespace ls {
 
-TernaryDomain::TernaryDomain(const LsValue& l, const LsValue& h) : lo(l), hi(h)
+TernaryDomain::TernaryDomain(const LsValue& l, const LsValue& h)
+    : d_lo(l), d_hi(h)
 {
-  Assert(isValid()) << "invalid domain <" << lo << ", " << hi << ">";
+  Assert(isValid(d_lo, d_hi))
+      << "invalid domain <" << d_lo << ", " << d_hi << ">";
 }
 
 TernaryDomain TernaryDomain::full(uint32_t w)
@@ -57,9 +59,9 @@ TernaryDomain TernaryDomain::fromString(const std::string& s)
   return TernaryDomain(lo, hi);
 }
 
-bool TernaryDomain::isValid() const
+bool TernaryDomain::isValid(const LsValue& l, const LsValue& h)
 {
-  return lo.getSize() == hi.getSize() && isZero(lo & ~hi);
+  return l.getSize() == h.getSize() && isZero(l & ~h);
 }
 
 uint32_t TernaryDomain::numFree() const
@@ -67,7 +69,7 @@ uint32_t TernaryDomain::numFree() const
   uint32_t n = 0;
   for (uint32_t i = 0, w = getSize(); i < w; ++i)
   {
-    if (lo.isBitSet(i) != hi.isBitSet(i))
+    if (!isFixedBit(i))
     {
       ++n;
     }
@@ -83,7 +85,7 @@ std::string TernaryDomain::toString() const
   {
     if (isFixedBit(i))
     {
-      s[w - 1 - i] = lo.isBitSet(i) ? '1' : '0';
+      s[w - 1 - i] = d_lo.isBitSet(i) ? '1' : '0';
     }
   }
   return s;
@@ -96,56 +98,56 @@ std::ostream& operator<<(std::ostream& os, const TernaryDomain& x)
 
 TernaryDomain notD(const TernaryDomain& x)
 {
-  return TernaryDomain(~x.hi, ~x.lo);
+  return TernaryDomain(~x.hi(), ~x.lo());
 }
 
 TernaryDomain andD(const TernaryDomain& x, const TernaryDomain& y)
 {
   Assert(x.getSize() == y.getSize());
   // A bit is 1 iff it is 1 in both, and it can be 1 iff it can be in both.
-  return TernaryDomain(x.lo & y.lo, x.hi & y.hi);
+  return TernaryDomain(x.lo() & y.lo(), x.hi() & y.hi());
 }
 
 TernaryDomain extractD(const TernaryDomain& x, uint32_t high, uint32_t low)
 {
-  return TernaryDomain(x.lo.extract(high, low), x.hi.extract(high, low));
+  return TernaryDomain(x.lo().extract(high, low), x.hi().extract(high, low));
 }
 
 TernaryDomain concatD(const TernaryDomain& x, const TernaryDomain& y)
 {
-  return TernaryDomain(x.lo.concat(y.lo), x.hi.concat(y.hi));
+  return TernaryDomain(x.lo().concat(y.lo()), x.hi().concat(y.hi()));
 }
 
 TernaryDomain shlD(const TernaryDomain& x, uint32_t k)
 {
   // The zeros shifted in are 0 in both lo and hi, i.e., fixed to 0.
-  return TernaryDomain(x.lo.leftShift(k), x.hi.leftShift(k));
+  return TernaryDomain(x.lo().leftShift(k), x.hi().leftShift(k));
 }
 
 TernaryDomain lshrD(const TernaryDomain& x, uint32_t k)
 {
-  return TernaryDomain(x.lo.logicalRightShift(k), x.hi.logicalRightShift(k));
+  return TernaryDomain(x.lo().logicalRightShift(k),
+                       x.hi().logicalRightShift(k));
 }
 
 std::optional<TernaryDomain> meet(const TernaryDomain& x,
                                   const TernaryDomain& y)
 {
   Assert(x.getSize() == y.getSize());
-  TernaryDomain res;
-  res.lo = x.lo | y.lo;
-  res.hi = x.hi & y.hi;
-  if (!res.isValid())
+  LsValue l = x.lo() | y.lo();
+  LsValue h = x.hi() & y.hi();
+  if (!TernaryDomain::isValid(l, h))
   {
     // Some bit is fixed to 1 in one domain and to 0 in the other.
     return std::nullopt;
   }
-  return res;
+  return TernaryDomain(l, h);
 }
 
 TernaryDomain join(const TernaryDomain& x, const TernaryDomain& y)
 {
   Assert(x.getSize() == y.getSize());
-  return TernaryDomain(x.lo & y.lo, x.hi | y.hi);
+  return TernaryDomain(x.lo() & y.lo(), x.hi() | y.hi());
 }
 
 LsValue compress(const TernaryDomain& x, const LsValue& v)
@@ -200,7 +202,7 @@ LsValue expand(const TernaryDomain& x, const LsValue& c)
     }
     Assert(k == c.getSize());
     // The free bits are 0 in lo, which adds the bits fixed to 1.
-    return LsValue(w, res) | x.lo;
+    return LsValue(w, res) | x.lo();
   }
   Integer res(0);
   for (uint32_t i = 0; i < w; ++i)
@@ -215,7 +217,7 @@ LsValue expand(const TernaryDomain& x, const LsValue& c)
     }
   }
   Assert(k == c.getSize());
-  return LsValue(w, res) | x.lo;
+  return LsValue(w, res) | x.lo();
 }
 
 std::optional<LsValue> minMatchingGeq(const TernaryDomain& x, const LsValue& a)
@@ -225,7 +227,7 @@ std::optional<LsValue> minMatchingGeq(const TernaryDomain& x, const LsValue& a)
   LsValue freeBits = x.freeMask();
   // The fixed bits where a differs from x. lo is 0 at the free bits, so it
   // holds exactly the bits fixed to 1.
-  LsValue diff = (a ^ x.lo) & ~freeBits;
+  LsValue diff = (a ^ x.lo()) & ~freeBits;
   if (isZero(diff))
   {
     return a;
@@ -233,11 +235,11 @@ std::optional<LsValue> minMatchingGeq(const TernaryDomain& x, const LsValue& a)
   // The highest such bit, i, decides: the bits of a above it match x.
   uint32_t i = w - 1 - clz(diff);
   LsValue above = LsValue::mkOnes(w).leftShift(i + 1);
-  if (x.lo.isBitSet(i))
+  if (x.lo().isBitSet(i))
   {
     // a has a 0 where x has a 1. Any matching value that agrees with a above
     // i is greater than a; the smallest one has its free bits below i at 0.
-    return (a & above & freeBits) | x.lo;
+    return (a & above & freeBits) | x.lo();
   }
   // a has a 1 where x has a 0, so a matching value that agrees with a above i
   // is smaller than a: the free bits above i, read as a number, must be
@@ -249,7 +251,7 @@ std::optional<LsValue> minMatchingGeq(const TernaryDomain& x, const LsValue& a)
   {
     return std::nullopt;  // the free bits above i are all 1 already
   }
-  return (inc(q) & freeBits & above) | x.lo;
+  return (inc(q) & freeBits & above) | x.lo();
 }
 
 std::optional<LsValue> maxMatchingLeq(const TernaryDomain& x, const LsValue& b)
@@ -298,7 +300,7 @@ LsValue pick(const TernaryDomain& x,
 
 LsValue pickNotEqual(const TernaryDomain& x, const LsValue& s, LsRng& rng)
 {
-  Assert(!x.isFixed() || x.lo != s)
+  Assert(!x.isFixed() || x.lo() != s)
       << "the only value matching " << x << " is " << s;
   if (!x.hasFixedBits())
   {

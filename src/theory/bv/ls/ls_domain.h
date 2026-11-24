@@ -34,9 +34,13 @@ namespace ls {
  * hi. The pair is valid iff no bit is 1 in lo and 0 in hi. A value matches
  * the domain if it agrees with every fixed bit; lo is the smallest and hi
  * the largest matching value (unsigned).
+ *
+ * The bounds are set only by the constructors, which require a valid pair, so
+ * every domain is valid.
  */
-struct TernaryDomain
+class TernaryDomain
 {
+ public:
   /** The domain of width 0. */
   TernaryDomain() {}
   /** The domain <l, h>. Requires it to be valid. */
@@ -52,20 +56,32 @@ struct TernaryDomain
    */
   static TernaryDomain fromString(const std::string& s);
 
-  uint32_t getSize() const { return lo.getSize(); }
-  /** Return true if lo and hi have the same width and no bit is 1 in lo and
-   * 0 in hi. */
-  bool isValid() const;
+  /**
+   * Return true if <l, h> is a valid domain: l and h have the same width and
+   * no bit is 1 in l and 0 in h.
+   */
+  static bool isValid(const LsValue& l, const LsValue& h);
+
+  /** The fixed 1s; 0 at the free bits. The smallest matching value. */
+  const LsValue& lo() const { return d_lo; }
+  /** The complement of the fixed 0s; 1 at the free bits. The largest
+   * matching value. */
+  const LsValue& hi() const { return d_hi; }
+
+  uint32_t getSize() const { return d_lo.getSize(); }
   /** Return true if every bit is fixed. */
-  bool isFixed() const { return lo == hi; }
+  bool isFixed() const { return d_lo == d_hi; }
   /** Return true if some bit is fixed. */
-  bool hasFixedBits() const { return !isZero(lo) || !isOnes(hi); }
+  bool hasFixedBits() const { return !isZero(d_lo) || !isOnes(d_hi); }
   /** Return true if bit i is fixed (to 1, to 0). Requires i < w. */
-  bool isFixedBit(uint32_t i) const { return lo.isBitSet(i) == hi.isBitSet(i); }
-  bool isFixedTrue(uint32_t i) const { return lo.isBitSet(i); }
-  bool isFixedFalse(uint32_t i) const { return !hi.isBitSet(i); }
+  bool isFixedBit(uint32_t i) const
+  {
+    return d_lo.isBitSet(i) == d_hi.isBitSet(i);
+  }
+  bool isFixedTrue(uint32_t i) const { return d_lo.isBitSet(i); }
+  bool isFixedFalse(uint32_t i) const { return !d_hi.isBitSet(i); }
   /** Return the value with a 1 at every free bit. */
-  LsValue freeMask() const { return lo ^ hi; }
+  LsValue freeMask() const { return d_lo ^ d_hi; }
   /** Return the number of free bits. */
   uint32_t numFree() const;
 
@@ -75,24 +91,23 @@ struct TernaryDomain
    */
   bool matches(const LsValue& v) const
   {
-    return (hi & v) == v && (lo | v) == v;
+    return (d_hi & v) == v && (d_lo | v) == v;
   }
   /** Return v with the fixed bits forced in, which matches the domain. */
-  LsValue apply(const LsValue& v) const { return (v & hi) | lo; }
+  LsValue apply(const LsValue& v) const { return (v & d_hi) | d_lo; }
 
   /** Like fromString. */
   std::string toString() const;
 
   bool operator==(const TernaryDomain& o) const
   {
-    return lo == o.lo && hi == o.hi;
+    return d_lo == o.d_lo && d_hi == o.d_hi;
   }
   bool operator!=(const TernaryDomain& o) const { return !(*this == o); }
 
-  /** The fixed 1s; 0 at the free bits. */
-  LsValue lo;
-  /** The complement of the fixed 0s; 1 at the free bits. */
-  LsValue hi;
+ private:
+  LsValue d_lo;
+  LsValue d_hi;
 };
 
 std::ostream& operator<<(std::ostream& os, const TernaryDomain& x);

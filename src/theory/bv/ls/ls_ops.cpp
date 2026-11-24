@@ -859,7 +859,7 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
     LsChildren ch;
     for (uint32_t i = 0, n = doms.size(); i < n; ++i)
     {
-      ch.push_back(&doms[i]->lo);
+      ch.push_back(&doms[i]->lo());
     }
     return TernaryDomain::fixed(evaluate(op, ch));
   }
@@ -878,14 +878,14 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
       {
         break;
       }
-      uint32_t k = shiftAmount(amount.lo, x.getSize());
+      uint32_t k = shiftAmount(amount.lo(), x.getSize());
       return op.kind == LsKind::SHL ? shlD(x, k) : lshrD(x, k);
     }
     case LsKind::ITE:
       // The selected branch if the condition is fixed, else either branch.
       if (x.isFixed())
       {
-        return x.lo.isBitSet(0) ? *doms[1] : *doms[2];
+        return x.lo().isBitSet(0) ? *doms[1] : *doms[2];
       }
       return join(*doms[1], *doms[2]);
     case LsKind::EQ:
