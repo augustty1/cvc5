@@ -121,6 +121,14 @@ constexpr uint32_t kUdivConsTries = 20;
  * steps may miss a value, but never returns a wrong one.
  */
 constexpr uint32_t kSearchLimit = 100;
+/**
+ * UREM pos 1 inverse: draw values of (t, s - t] that divide s - t instead of
+ * taking a divisor that the bounded search finds. This keeps the divisors
+ * that the search misses reachable (plan D19).
+ */
+constexpr uint32_t kProbUremInvSample = 100;
+/** UREM pos 1 inverse: the number of values drawn there. */
+constexpr uint32_t kUremDivisorSamples = 16;
 
 }  // namespace
 
@@ -926,6 +934,47 @@ std::optional<LsValue> udivConsistent(const TernaryDomain& x,
 }
 
 /**
+ * For s mod x = t with n = s - t > t: call f(d) for each divisor d > t of n
+ * that matches x and that the bounded search finds, i.e., n itself and the
+ * divisor pairs (i, n / i) for i <= kSearchLimit, in a fixed order, until f
+ * returns true. Return true iff f did. There is no factorization (plan D19):
+ * a divisor d with d > kSearchLimit and n / d > kSearchLimit is not found.
+ */
+template <class F>
+bool forEachFoundDivisor(const TernaryDomain& x,
+                         const LsValue& n,
+                         const LsValue& t,
+                         F f)
+{
+  uint32_t w = n.getSize();
+  auto visit = [&](const LsValue& d) {
+    return t.unsignedLessThan(d) && x.matches(d) && f(d);
+  };
+  for (uint32_t i = 1; i <= kSearchLimit; ++i)
+  {
+    if (w < 32 && i >= (uint32_t(1) << w))
+    {
+      break;  // i does not fit in w bits
+    }
+    LsValue d(w, i);
+    if (umulOverflow(d, d) || n.unsignedLessThan(d * d))
+    {
+      break;  // all pairs seen: i > sqrt(n)
+    }
+    if (!isZero(n.unsignedRemTotal(d)))
+    {
+      continue;
+    }
+    LsValue e = n.unsignedDivTotal(d);
+    if (visit(d) || (e != d && visit(e)))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * The part of the invertibility condition that concerns the fixed bits of x.
  * Requires the base condition isInvertible(op, posX, t, ch) to hold.
  */
@@ -1047,7 +1096,39 @@ bool icFixedBits(const OpInfo& op,
           x, inc(s.unsignedDivTotal(inc(t))), s.unsignedDivTotal(t));
     }
     case LsKind::UREM:
-      Unimplemented() << "invertibility modulo constant bits for " << op.kind;
+    {
+      if (posX == 0)
+      {
+        Unimplemented() << "invertibility modulo constant bits for UREM at 0";
+      }
+      // s mod x = t: Table III. The base condition holds, so s >= t.
+      const LsValue& s = *ch[0];
+      uint32_t w = t.getSize();
+      if (s == t)
+      {
+        // (x^lo = 0 or x^hi > t): s mod 0 = s, and s mod x = s for x > s.
+        return x.matches(LsValue::mkZero(w)) || t.unsignedLessThan(x.hi());
+      }
+      // The existential of Table III: a divisor y > t of n = s - t that
+      // matches x (the base condition gives n > t). First the exact tests:
+      // a divisor is at most n, and has at most ctz(n) trailing zeros, so
+      // one of the bits 0, ..., ctz(n) of x must be able to be 1.
+      LsValue n = s - t;
+      if (!hasMatchingIn(x, inc(t), n))
+      {
+        return false;
+      }
+      LsValue low = LsValue::mkOnes(w).logicalRightShift(w - 1 - ctz(n));
+      if (isZero(x.hi() & low))
+      {
+        return false;
+      }
+      // Then the bounded search, without factorization (plan D19): it may
+      // say no although a divisor matches, never the opposite. A wrong no
+      // only sends the step to tryConsistentValue, whose values include
+      // every inverse value.
+      return forEachFoundDivisor(x, n, t, [](const LsValue&) { return true; });
+    }
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -1173,7 +1254,71 @@ LsValue inverseFixedBits(const OpInfo& op,
           x, inc(s.unsignedDivTotal(inc(t))), s.unsignedDivTotal(t), rng);
     }
     case LsKind::UREM:
-      Unimplemented() << "inverse value modulo constant bits for " << op.kind;
+    {
+      if (posX == 0)
+      {
+        Unimplemented() << "inverse value modulo constant bits for UREM at 0";
+      }
+      const LsValue& s = *ch[0];
+      LsValue zero = LsValue::mkZero(w);
+      if (s == t)
+      {
+        // 0, with the probability of the base rule, or any value > t.
+        bool zeroOk = x.matches(zero);
+        bool aboveOk = t.unsignedLessThan(x.hi());
+        if (zeroOk && (!aboveOk || rng.pickWithProb(kProbUremInvZero)))
+        {
+          return zero;
+        }
+        return pick(x, inc(t), LsValue::mkOnes(w), rng);
+      }
+      LsValue n = s - t;
+      // The choices of the base rule: n itself, and 1 for t = 0.
+      if (x.matches(n) && rng.pickWithProb(kProbUremInvN))
+      {
+        return n;
+      }
+      LsValue one = LsValue::mkOne(w);
+      if (isZero(t) && x.matches(one) && rng.pickWithProb(kProbUremInvOne))
+      {
+        return one;
+      }
+      // Sometimes, values of (t, n] that match x, kept if they divide n: every
+      // divisor that matches x has a non-zero probability, including those
+      // the bounded search misses (plan R3, D19).
+      if (rng.pickWithProb(kProbUremInvSample))
+      {
+        DomainSampler sampler(x, inc(t), n);
+        Assert(!sampler.empty());
+        for (uint32_t i = 0; i < kUremDivisorSamples; ++i)
+        {
+          LsValue d = sampler.random(rng);
+          if (isZero(n.unsignedRemTotal(d)))
+          {
+            return d;
+          }
+        }
+      }
+      // Otherwise a uniform divisor among those the bounded search finds;
+      // isInvertible found one.
+      uint32_t count = 0;
+      forEachFoundDivisor(x, n, t, [&count](const LsValue&) {
+        ++count;
+        return false;
+      });
+      Assert(count > 0);
+      uint32_t j = rng.pickIndex(count);
+      LsValue res;
+      forEachFoundDivisor(x, n, t, [&j, &res](const LsValue& d) {
+        if (j-- > 0)
+        {
+          return false;
+        }
+        res = d;
+        return true;
+      });
+      return res;
+    }
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -1322,8 +1467,28 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
       return sampler.random(rng);
     }
     case LsKind::UREM:
-      Unimplemented() << "consistent value modulo constant bits for "
-                      << op.kind;
+    {
+      if (posX == 0)
+      {
+        Unimplemented()
+            << "consistent value modulo constant bits for UREM at 0";
+      }
+      // s' mod x = t: Table V (synthesized), equivalently x^lo = 0 or x^hi >
+      // t. The consistent values are 0 (s' = t) and every x > t (s' = t), as
+      // in the base rule.
+      LsValue zero = LsValue::mkZero(w);
+      bool zeroOk = x.matches(zero);
+      bool aboveOk = t.unsignedLessThan(x.hi());
+      if (!zeroOk && !aboveOk)
+      {
+        return std::nullopt;
+      }
+      if (zeroOk && (!aboveOk || rng.pickWithProb(kProbUremConsZero)))
+      {
+        return zero;
+      }
+      return pick(x, inc(t), LsValue::mkOnes(w), rng);
+    }
     case LsKind::CONST:
     case LsKind::VAR: break;
   }

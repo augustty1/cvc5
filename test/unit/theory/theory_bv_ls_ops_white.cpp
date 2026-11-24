@@ -1149,6 +1149,121 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_udiv_consistent_wide)
 }
 
 /**
+ * The rules modulo constant bits of s mod x = t (UREM at position 1, goal 8
+ * of Step 3) against brute force: every domain with a fixed bit up to 3 bits,
+ * sampled at 4 bits. Up to 4 bits the bounded divisor search sees every
+ * divisor, so the check is exact here.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_urem_divisors)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    checkRulesDomains({LsKind::UREM}, 1, {w, w}, w == 4);
+  }
+}
+
+/**
+ * s mod x = t at 16 bits, where the bounded divisor search (pairs (i, n / i)
+ * for i <= 100, no factorization, plan D19) does not see every divisor of
+ * n = s - t.
+ *
+ * With n = 2 * 101 * 103 = 20806 and t = 1, the search finds 2, 10403 and
+ * 20806 but not 101, 103, 202 or 206. The inverse values still reach those
+ * through the sampling stage, so every divisor has a non-zero probability
+ * (plan R3).
+ *
+ * With n = 101 * 103 and x < 2^8, the only solutions are 101 and 103 (n does
+ * not fit) and the search finds neither: the check says no, which plan D19
+ * accepts. The step
+ * then takes the consistent branch, whose values (0 and every x > t) include
+ * them. With the factorization of v3 the check would say yes.
+ *
+ * On random domains and targets, the check never says yes wrongly, and the
+ * inverse values are always divisors that match x.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_urem_divisors_wide)
+{
+  const uint32_t w = 16;
+  OpInfo urem{LsKind::UREM};
+  // x < 2^15: some fixed bit, so the rules modulo constant bits apply.
+  TernaryDomain below15(LsValue::mkZero(w), LsValue(w, 0x7fff));
+  {
+    LsValue t(w, 1);
+    LsValue s(w, 2 * 101 * 103 + 1);
+    LsValue cur(w, 5);
+    LsChildren ch{&s, &cur};
+    ASSERT_TRUE(isInvertible(urem, 1, t, ch, below15));
+    std::set<uint64_t> seen;
+    for (uint32_t i = 0; i < 100000; ++i)
+    {
+      LsValue v = inverseValue(urem, 1, t, ch, below15, d_rng);
+      uint64_t d = v.toInteger().getUnsignedLong();
+      ASSERT_TRUE(d > 1 && 20806 % d == 0 && below15.matches(v)) << v;
+      seen.insert(d);
+    }
+    ASSERT_TRUE(seen.count(2) && seen.count(10403) && seen.count(20806));
+    bool missedByTheSearch = seen.count(101) || seen.count(103)
+                             || seen.count(202) || seen.count(206);
+    ASSERT_TRUE(missedByTheSearch);
+  }
+  {
+    TernaryDomain below8(LsValue::mkZero(w), LsValue(w, 0xff));
+    LsValue t(w, 1);
+    LsValue s(w, 101 * 103 + 1);
+    LsValue cur(w, 5);
+    LsChildren ch{&s, &cur};
+    ASSERT_FALSE(isInvertible(urem, 1, t, ch, below8));
+    std::set<uint64_t> seen;
+    for (uint32_t i = 0; i < 20000; ++i)
+    {
+      std::optional<LsValue> v =
+          tryConsistentValue(urem, 1, t, ch, below8, d_rng);
+      ASSERT_TRUE(v.has_value());
+      seen.insert(v->toInteger().getUnsignedLong());
+    }
+    ASSERT_TRUE(seen.count(101) || seen.count(103));
+  }
+
+  LsRng gen(59);
+  for (uint32_t r = 0; r < 500; ++r)
+  {
+    LsValue fixed = gen.randomValue(w) & gen.randomValue(w);
+    LsValue bits = gen.randomValue(w) & fixed;
+    TernaryDomain x(bits, bits | ~fixed);
+    if (!x.hasFixedBits())
+    {
+      continue;
+    }
+    LsValue s = gen.randomValue(w);
+    LsValue t = r % 2 == 0 ? LsValue(w, gen.pickIndex(8))
+                           : gen.randomValue(w).unsignedRemTotal(inc(s));
+    LsValue cur = x.apply(gen.randomValue(w));
+    LsChildren ch{&s, &cur};
+    uint64_t sv = s.toInteger().getUnsignedLong();
+    uint64_t tv = t.toInteger().getUnsignedLong();
+    bool exists = false;
+    for (uint64_t v = 0; v < (uint64_t(1) << w) && !exists; ++v)
+    {
+      exists = x.matches(LsValue(w, v)) && (v == 0 ? sv : sv % v) == tv;
+    }
+    std::stringstream ctx;
+    ctx << "x=" << x << " s=" << s << " t=" << t;
+    bool ic = isInvertible(urem, 1, t, ch, x);
+    ASSERT_TRUE(!ic || exists) << ctx.str() << " (wrong yes)";
+    if (ic)
+    {
+      for (uint32_t i = 0; i < 20; ++i)
+      {
+        LsValue v = inverseValue(urem, 1, t, ch, x, d_rng);
+        uint64_t vv = v.toInteger().getUnsignedLong();
+        ASSERT_TRUE(x.matches(v) && (vv == 0 ? sv : sv % vv) == tv)
+            << ctx.str() << " inverse=" << v;
+      }
+    }
+  }
+}
+
+/**
  * forwardDomain is sound: the value of the operator matches it whenever the
  * values of the children match their domains. Where it is documented to be
  * exact, a bit is fixed iff it is the same for all those values.
