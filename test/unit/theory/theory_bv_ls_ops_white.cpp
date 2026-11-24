@@ -9,6 +9,7 @@
  * (theory/bv/ls/ls_ops.h).
  */
 
+#include <optional>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -771,7 +772,6 @@ TEST_F(TestTheoryWhiteBvLsOps, full_domain_is_base)
             const TernaryDomain& x = full[pos];
             bool ic = isInvertible(op, pos, t, ch);
             ASSERT_EQ(isInvertible(op, pos, t, ch, x), ic) << ctx.str();
-            ASSERT_TRUE(isConsistent(op, pos, t, ch, x)) << ctx.str();
             ASSERT_EQ(isEssential(op, pos, t, ch, doms),
                       isEssential(op, pos, t, ch))
                 << ctx.str();
@@ -782,9 +782,11 @@ TEST_F(TestTheoryWhiteBvLsOps, full_domain_is_base)
                         inverseValue(op, pos, t, ch, r2))
                   << ctx.str();
             }
-            ASSERT_EQ(consistentValue(op, pos, t, ch, x, r1),
-                      consistentValue(op, pos, t, ch, r2))
-                << ctx.str();
+            // Without fixed bits a consistent value always exists.
+            std::optional<LsValue> c =
+                tryConsistentValue(op, pos, t, ch, x, r1);
+            ASSERT_TRUE(c.has_value()) << ctx.str();
+            ASSERT_EQ(*c, consistentValue(op, pos, t, ch, r2)) << ctx.str();
             ASSERT_EQ(r1.randomValue(64), r2.randomValue(64)) << ctx.str();
           }
         }

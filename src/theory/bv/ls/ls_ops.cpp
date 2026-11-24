@@ -720,16 +720,6 @@ bool icFixedBits(const OpInfo& op,
   Unimplemented() << "invertibility modulo constant bits for " << op.kind;
 }
 
-/** The consistency condition, see isConsistent. */
-bool ccFixedBits(const OpInfo& op,
-                 CVC5_UNUSED uint32_t posX,
-                 CVC5_UNUSED const LsValue& t,
-                 CVC5_UNUSED const LsChildren& ch,
-                 CVC5_UNUSED const TernaryDomain& x)
-{
-  Unimplemented() << "consistency modulo constant bits for " << op.kind;
-}
-
 /** The inverse value rules, see inverseValue. */
 LsValue inverseFixedBits(const OpInfo& op,
                          CVC5_UNUSED uint32_t posX,
@@ -741,13 +731,16 @@ LsValue inverseFixedBits(const OpInfo& op,
   Unimplemented() << "inverse value modulo constant bits for " << op.kind;
 }
 
-/** The consistent value rules, see consistentValue. */
-LsValue consistentFixedBits(const OpInfo& op,
-                            CVC5_UNUSED uint32_t posX,
-                            CVC5_UNUSED const LsValue& t,
-                            CVC5_UNUSED const LsChildren& ch,
-                            CVC5_UNUSED const TernaryDomain& x,
-                            CVC5_UNUSED LsRng& rng)
+/**
+ * The consistency condition and the consistent value rules, see
+ * tryConsistentValue.
+ */
+std::optional<LsValue> consistentFixedBits(const OpInfo& op,
+                                           CVC5_UNUSED uint32_t posX,
+                                           CVC5_UNUSED const LsValue& t,
+                                           CVC5_UNUSED const LsChildren& ch,
+                                           CVC5_UNUSED const TernaryDomain& x,
+                                           CVC5_UNUSED LsRng& rng)
 {
   Unimplemented() << "consistent value modulo constant bits for " << op.kind;
 }
@@ -767,19 +760,6 @@ bool isInvertible(const OpInfo& op,
     return false;
   }
   return !x.hasFixedBits() || icFixedBits(op, posX, t, ch, x);
-}
-
-bool isConsistent(const OpInfo& op,
-                  uint32_t posX,
-                  const LsValue& t,
-                  const LsChildren& ch,
-                  const TernaryDomain& x)
-{
-  Assert(ch.size() == arity(op.kind));
-  Assert(posX < ch.size());
-  Assert(x.getSize() == ch[posX]->getSize());
-  // Without fixed bits there always is a consistent value.
-  return !x.hasFixedBits() || ccFixedBits(op, posX, t, ch, x);
 }
 
 bool isEssential(const OpInfo& op,
@@ -827,21 +807,26 @@ LsValue inverseValue(const OpInfo& op,
   return v;
 }
 
-LsValue consistentValue(const OpInfo& op,
-                        uint32_t posX,
-                        const LsValue& t,
-                        const LsChildren& ch,
-                        const TernaryDomain& x,
-                        LsRng& rng)
+std::optional<LsValue> tryConsistentValue(const OpInfo& op,
+                                          uint32_t posX,
+                                          const LsValue& t,
+                                          const LsChildren& ch,
+                                          const TernaryDomain& x,
+                                          LsRng& rng)
 {
+  Assert(ch.size() == arity(op.kind));
+  Assert(posX < ch.size());
+  Assert(x.getSize() == ch[posX]->getSize());
   if (!x.hasFixedBits())
   {
+    // For the base operators a consistent value always exists.
     return consistentValue(op, posX, t, ch, rng);
   }
-  Assert(isConsistent(op, posX, t, ch, x));
-  LsValue v = consistentFixedBits(op, posX, t, ch, x, rng);
-  Assert(x.matches(v)) << "consistent value " << v << " for " << op.kind
-                       << " at " << posX << " does not match " << x;
+  Assert(x.matches(*ch[posX]))
+      << "current value " << *ch[posX] << " does not match " << x;
+  std::optional<LsValue> v = consistentFixedBits(op, posX, t, ch, x, rng);
+  Assert(!v || x.matches(*v)) << "consistent value " << *v << " for " << op.kind
+                              << " at " << posX << " does not match " << x;
   return v;
 }
 

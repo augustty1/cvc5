@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <iosfwd>
+#include <optional>
 
 #include "base/check.h"
 #include "theory/bv/ls/ls_domain.h"
@@ -176,6 +177,11 @@ LsValue consistentValue(const OpInfo& op,
  * of the child being solved for, and only produce values that match it. The
  * current value ch[posX] must match x. If x has no fixed bits, each of them
  * is the function above, with the same random draws.
+ *
+ * A propagation step towards child posX follows FMCAD'20 Fig. 2: if
+ * isInvertible holds (and the inverse branch is chosen), the target becomes
+ * inverseValue; otherwise it becomes tryConsistentValue, and if that returns
+ * nothing the move ends in a conflict.
  */
 
 /**
@@ -184,23 +190,13 @@ LsValue consistentValue(const OpInfo& op,
  * modulo constant bits, FMCAD'20 Tables II-III). Does not draw random
  * numbers.
  *
- * Where the exact condition asks for a value in a large set (UDIV, UREM),
- * only a bounded number of candidates is tried: the result may be false
- * although such a value exists, but never the opposite.
+ * For UREM the exact condition asks for a value in a set that can be too
+ * large to search: after the exact tests, only a bounded number of
+ * candidates is tried, so the result may be false although such a value
+ * exists, but never the opposite. A false only sends the step to
+ * tryConsistentValue, whose values include every inverse value.
  */
 bool isInvertible(const OpInfo& op,
-                  uint32_t posX,
-                  const LsValue& t,
-                  const LsChildren& ch,
-                  const TernaryDomain& x);
-
-/**
- * Return true if there is a value x' matching x for child posX such that op
- * evaluates to t for some values of the other children (the consistency
- * condition, FMCAD'20 Tables IV-V). Always true if x has no fixed bits. Does
- * not draw random numbers, and is bounded like isInvertible.
- */
-bool isConsistent(const OpInfo& op,
                   uint32_t posX,
                   const LsValue& t,
                   const LsChildren& ch,
@@ -234,15 +230,28 @@ LsValue inverseValue(const OpInfo& op,
 
 /**
  * Return a random value x' matching x for child posX such that op evaluates
- * to t for some values of the other children. Requires isConsistent(op,
- * posX, t, ch, x).
+ * to t for some values of the other children (a consistent value modulo
+ * constant bits, FMCAD'20 Tables IV-V), or nothing if there is none, which
+ * makes the move end in a conflict. If x has no fixed bits this is
+ * consistentValue(op, posX, t, ch, rng), with the same random draws.
+ *
+ * Every consistent value matching x has a non-zero probability, except for
+ * the branches of ITE, whose only value is t. The result is nothing iff no
+ * consistent value matches x, except for UDIV at position 0, where it may
+ * also be nothing, with a probability below 1, when such a value exists.
+ *
+ * The consistency condition and the value are one function because the
+ * condition for UDIV at position 0 is decided by a search that ends with
+ * random draws: a separate check without random numbers could say no for
+ * ever on the same t and x although a value exists, and since a no is a
+ * conflict, the search could never reach that value (plan Sec. 0.5, R2).
  */
-LsValue consistentValue(const OpInfo& op,
-                        uint32_t posX,
-                        const LsValue& t,
-                        const LsChildren& ch,
-                        const TernaryDomain& x,
-                        LsRng& rng);
+std::optional<LsValue> tryConsistentValue(const OpInfo& op,
+                                          uint32_t posX,
+                                          const LsValue& t,
+                                          const LsChildren& ch,
+                                          const TernaryDomain& x,
+                                          LsRng& rng);
 
 /**
  * Return a domain that the value of op matches whenever the values of its
