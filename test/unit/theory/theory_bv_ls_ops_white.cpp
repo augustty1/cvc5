@@ -1003,6 +1003,152 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_ult_shifts)
 }
 
 /**
+ * The rules modulo constant bits of MUL and UDIV (goal 6 of Step 3) against
+ * brute force: every domain with a fixed bit up to 3 bits, sampled at 4
+ * bits. Up to 4 bits the search of the UDIV consistent value at position 0
+ * always ends within its step limit, so it is exact here.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_mul_udiv)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    bool sampled = w == 4;
+    for (LsKind k : {LsKind::MUL, LsKind::UDIV})
+    {
+      for (uint32_t pos = 0; pos < 2; ++pos)
+      {
+        checkRulesDomains({k}, pos, {w, w}, sampled);
+      }
+    }
+  }
+}
+
+/**
+ * Return true if some s gives v / s = t at width w <= 32 (with v / 0 =
+ * ones): for t = ones (s = 0); for t = 0 iff v != ones (s > v); otherwise
+ * iff v mod t < v div t (s = v div t), which includes v = t.
+ */
+static bool udivConsistentRef(uint64_t v, uint64_t t, uint32_t w)
+{
+  uint64_t ones = (uint64_t(1) << w) - 1;
+  if (t == ones)
+  {
+    return true;
+  }
+  if (t == 0)
+  {
+    return v != ones;
+  }
+  return v % t < v / t;
+}
+
+/**
+ * The consistent value of x / s = t modulo constant bits at 16 bits, where
+ * the bounded search of its stage 4 (plan, Sec. 3.4) can run out of steps.
+ *
+ * With t = 256 and the low byte of x fixed to 200, the consistent values
+ * are the dividends of y >= 201: the search from y = 2 needs about 200
+ * steps, more than its limit of 100. Stage 2 draws y in [2, 255] and finds
+ * a value with probability 1 - (199/254)^20, about 0.99. So the result is
+ * nothing in a few calls, which is not a wrong answer for ever: most calls
+ * return a value (plan R2). In the version that only searched (v1), every
+ * call returned nothing.
+ *
+ * On random domains and targets, every value returned matches x and is
+ * consistent, and when a consistent value matching x exists, some call out
+ * of 40 returns one.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_udiv_consistent_wide)
+{
+  const uint32_t w = 16;
+  OpInfo udiv{LsKind::UDIV};
+  for (uint32_t v = 0; v < 16; ++v)
+  {
+    for (uint32_t t = 0; t < 16; ++t)
+    {
+      bool exists = false;
+      for (uint32_t sv = 0; sv < 16; ++sv)
+      {
+        exists = exists || refBinary(LsKind::UDIV, 4, v, sv) == t;
+      }
+      ASSERT_EQ(udivConsistentRef(v, t, 4), exists) << v << " " << t;
+    }
+  }
+
+  {
+    TernaryDomain x(LsValue(w, 200), LsValue(w, 0xffc8));
+    LsValue t(w, 256);
+    LsValue cur(w, 0x1000 + 200);
+    LsValue s(w, 3);
+    LsChildren ch{&cur, &s};
+    uint32_t values = 0;
+    uint32_t nothing = 0;
+    for (uint32_t i = 0; i < 2000; ++i)
+    {
+      std::optional<LsValue> v = tryConsistentValue(udiv, 0, t, ch, x, d_rng);
+      if (!v)
+      {
+        ++nothing;
+        continue;
+      }
+      uint64_t vv = v->toInteger().getUnsignedLong();
+      ASSERT_TRUE(x.matches(*v)) << *v;
+      ASSERT_TRUE(udivConsistentRef(vv, 256, w)) << *v;
+      ASSERT_GE(vv / 256, 201u) << *v;
+      ++values;
+    }
+    ASSERT_GT(nothing, 0u);
+    ASSERT_GT(values, 1900u);
+  }
+
+  LsRng gen(53);
+  uint32_t withValue = 0;
+  uint32_t without = 0;
+  for (uint32_t r = 0; r < 300; ++r)
+  {
+    // Many fixed bits make the consistent values sparse; targets near 2^8
+    // have the most runs of dividends.
+    LsValue fixed = gen.randomValue(w) | gen.randomValue(w);
+    LsValue bits = gen.randomValue(w) & fixed;
+    TernaryDomain x(bits, bits | ~fixed);
+    LsValue t = r % 3 == 0
+                    ? gen.randomValue(w)
+                    : LsValue(w, 2 + gen.pickIndex(r % 3 == 1 ? 30 : 600));
+    uint64_t tv = t.toInteger().getUnsignedLong();
+    uint64_t lo = x.lo().toInteger().getUnsignedLong();
+    uint64_t hi = x.hi().toInteger().getUnsignedLong();
+    bool exists = false;
+    for (uint64_t v = 0; v < (uint64_t(1) << w) && !exists; ++v)
+    {
+      exists = (v & hi) == v && (v | lo) == v && udivConsistentRef(v, tv, w);
+    }
+    LsValue cur = x.apply(gen.randomValue(w));
+    LsValue s = gen.randomValue(w);
+    LsChildren ch{&cur, &s};
+    std::stringstream ctx;
+    ctx << "x=" << x << " t=" << t;
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < 40; ++i)
+    {
+      std::optional<LsValue> v = tryConsistentValue(udiv, 0, t, ch, x, d_rng);
+      if (!v)
+      {
+        continue;
+      }
+      ASSERT_TRUE(x.matches(*v)) << ctx.str() << " v=" << *v;
+      ASSERT_TRUE(udivConsistentRef(v->toInteger().getUnsignedLong(), tv, w))
+          << ctx.str() << " v=" << *v;
+      ++got;
+    }
+    ASSERT_EQ(got > 0, exists) << ctx.str();
+    ++(exists ? withValue : without);
+  }
+  // Both outcomes occur.
+  ASSERT_GT(withValue, 50u);
+  ASSERT_GT(without, 10u);
+}
+
+/**
  * forwardDomain is sound: the value of the operator matches it whenever the
  * values of the children match their domains. Where it is documented to be
  * exact, a bit is fixed iff it is the same for all those values.

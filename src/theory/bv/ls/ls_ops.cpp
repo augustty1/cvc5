@@ -106,6 +106,22 @@ constexpr uint32_t kProbUremConsZero = 100;
 /** Maximum number of trial divisions when searching a divisor for UREM. */
 constexpr uint32_t kMaxDivisorTrials = 256;
 
+/*
+ * Bounds of the rules modulo constant bits.
+ */
+/**
+ * UDIV pos 0 consistent: return t when it matches the domain. The other
+ * stages never draw t, so this keeps its probability above zero (plan D9).
+ */
+constexpr uint32_t kProbUdivConsT = 100;
+/** UDIV pos 0 consistent: random divisors tried first (as in Bitwuzla). */
+constexpr uint32_t kUdivConsTries = 20;
+/**
+ * Steps of the bounded deterministic searches. A search that runs out of
+ * steps may miss a value, but never returns a wrong one.
+ */
+constexpr uint32_t kSearchLimit = 100;
+
 }  // namespace
 
 LsValue evaluate(const OpInfo& op, const LsChildren& ch)
@@ -730,6 +746,186 @@ TernaryDomain shiftDomain(const TernaryDomain& x, uint32_t k, bool left)
 }
 
 /**
+ * Return y * t + y - 1, capped at ones: the largest x with x / y = t, for y
+ * >= 1 such that y * t does not overflow. The x with x / y = t are the
+ * "dividends" [y * t, udivDividendsEnd(y, t)].
+ */
+LsValue udivDividendsEnd(const LsValue& y, const LsValue& t)
+{
+  LsValue yt = y * t;
+  LsValue d = dec(y);
+  return uaddOverflow(yt, d) ? LsValue::mkOnes(t.getSize()) : yt + d;
+}
+
+/**
+ * The consistent value of x * s = t modulo constant bits (Table V): for t =
+ * 0 every value (s = 0); otherwise the values with a 1 at some bit i <=
+ * ctz(t), i.e., with ctz(x) <= ctz(t), since x = x' * 2^ctz(x) with x' odd
+ * and s = (t >> ctz(x)) / x' give x * s = t.
+ */
+std::optional<LsValue> mulConsistent(const TernaryDomain& x,
+                                     const LsValue& t,
+                                     LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  if (isZero(t))
+  {
+    return pick(x, rng);
+  }
+  LsValue low = LsValue::mkOnes(w).logicalRightShift(w - 1 - ctz(t));
+  LsValue canBeOne = x.hi() & low;
+  if (isZero(canBeOne))
+  {
+    return std::nullopt;
+  }
+  LsValue v = pick(x, rng);
+  if (isZero(v & low))
+  {
+    // A fixed 1 at a bit <= ctz(t) would be in v, so the bits there that
+    // can be 1 are free: set one of them, chosen uniformly. Every
+    // consistent value is also drawn directly by pick.
+    uint32_t j = rng.pickIndex(popcount(canBeOne));
+    for (uint32_t i = 0;; ++i)
+    {
+      if (canBeOne.isBitSet(i) && j-- == 0)
+      {
+        return v | LsValue::mkOne(w).leftShift(i);
+      }
+    }
+  }
+  return v;
+}
+
+/**
+ * The consistent value of x / s = t modulo constant bits (plan, Sec. 3.4).
+ *
+ * For 1 < t < ones, x is consistent iff x / y = t for some y >= 1, i.e., x
+ * is a dividend of y: x = t (y = 1), or x >= 2t with x mod t < x div t (y =
+ * x div t). The dividends of y >= t cover [t * t, ones]. Table V states this
+ * as an existential over y; it is decided in stages, of which only the
+ * bounded search of stage 4 can miss a value. A miss there is not
+ * systematic: stage 2 draws every consistent value other than t with a
+ * non-zero probability, so the search never loses a value for ever (R2).
+ */
+std::optional<LsValue> udivConsistent(const TernaryDomain& x,
+                                      const LsValue& t,
+                                      LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  LsValue zero = LsValue::mkZero(w);
+  LsValue one = LsValue::mkOne(w);
+  LsValue ones = LsValue::mkOnes(w);
+  if (isOnes(t))
+  {
+    return pick(x, rng);  // x / 0 = ones
+  }
+  if (isZero(t))
+  {
+    // Table V: x^lo != ones; x / y = 0 for every y > x.
+    if (isOnes(x.lo()))
+    {
+      return std::nullopt;
+    }
+    return pick(x, zero, dec(ones), rng);
+  }
+  if (t == one)
+  {
+    // x / x = 1 for x != 0.
+    if (isZero(x.hi()))
+    {
+      return std::nullopt;
+    }
+    return pick(x, one, ones, rng);
+  }
+  // Table V: x^hi >= t, since every consistent value is at least t.
+  if (x.hi().unsignedLessThan(t))
+  {
+    return std::nullopt;
+  }
+
+  // 1. t itself, which the other stages never draw.
+  bool tMatches = x.matches(t);
+  if (tMatches && rng.pickWithProb(kProbUdivConsT))
+  {
+    return t;
+  }
+
+  // 2. Random divisors y >= 2 whose dividends may lie in [x^lo, x^hi], as in
+  // Bitwuzla. Every consistent value v != t is a dividend of y = v div t,
+  // which is in this range of y.
+  LsValue two = inc(one);
+  LsValue ymin = x.lo().unsignedDivTotal(t);
+  if (ymin.unsignedLessThan(two))
+  {
+    ymin = two;
+  }
+  LsValue ymax = x.hi().unsignedDivTotal(t);
+  if (ymin.unsignedLessThanEq(ymax))
+  {
+    for (uint32_t i = 0; i < kUdivConsTries; ++i)
+    {
+      LsValue y = rng.randomInRange(ymin, ymax);
+      DomainSampler sampler(x, y * t, udivDividendsEnd(y, t));
+      if (!sampler.empty())
+      {
+        return sampler.random(rng);
+      }
+    }
+  }
+
+  // 3. [t * t, ones], where every value is consistent: exact.
+  bool squareFits = !umulOverflow(t, t);
+  if (squareFits)
+  {
+    DomainSampler sampler(x, t * t, ones);
+    if (!sampler.empty())
+    {
+      return sampler.random(rng);
+    }
+  }
+
+  // 4. The smallest consistent matching value in [2t, t * t), jumping from
+  // each matching value that falls between two runs of dividends to the next
+  // run. Exact if it ends within kSearchLimit steps.
+  if (!uaddOverflow(t, t))
+  {
+    LsValue a = t + t;
+    if (a.unsignedLessThan(x.lo()))
+    {
+      a = x.lo();
+    }
+    for (uint32_t i = 0; i < kSearchLimit; ++i)
+    {
+      std::optional<LsValue> v = minMatchingGeq(x, a);
+      if (!v)
+      {
+        break;  // no matching value >= a
+      }
+      // A matching value >= t * t would have been found in stage 3.
+      Assert(!squareFits || v->unsignedLessThan(t * t));
+      LsValue y = v->unsignedDivTotal(t);
+      if (v->unsignedRemTotal(t).unsignedLessThan(y))
+      {
+        return DomainSampler(x, y * t, udivDividendsEnd(y, t)).random(rng);
+      }
+      // v lies after the dividends of y; those of y + 1 start at (y + 1) t.
+      if (umulOverflow(inc(y), t))
+      {
+        break;
+      }
+      a = inc(y) * t;
+    }
+  }
+
+  // 5. t, or no value.
+  if (tMatches)
+  {
+    return t;
+  }
+  return std::nullopt;
+}
+
+/**
  * The part of the invertibility condition that concerns the fixed bits of x.
  * Requires the base condition isInvertible(op, posX, t, ch) to hold.
  */
@@ -814,7 +1010,42 @@ bool icFixedBits(const OpInfo& op,
       return x.matches(LsValue(w, shiftZeros(t, left) - shiftZeros(s, left)));
     }
     case LsKind::MUL:
+    {
+      // x * s = t: Table III. If s = 0 then t = 0 (the base condition) and
+      // every x is a solution. Otherwise, with c = ctz(s) and y = (t >> c) *
+      // (s >> c)^-1, the solutions are the values whose low w - c bits are
+      // those of y: mcb(x << c, y << c).
+      const LsValue& s = *ch[1 - posX];
+      if (isZero(s))
+      {
+        return true;
+      }
+      uint32_t c = ctz(s);
+      LsValue y = t.logicalRightShift(c) * modInverse(s.logicalRightShift(c));
+      return shlD(x, c).matches(y.leftShift(c));
+    }
     case LsKind::UDIV:
+    {
+      // Table III gives these conditions as existentials; the solutions form
+      // an interval, so they are decided exactly.
+      const LsValue& s = *ch[1 - posX];
+      uint32_t w = t.getSize();
+      if (posX == 0)
+      {
+        // x / s = t: the dividends of s (s * t does not overflow by the base
+        // condition); s = 0 needs t = ones, and then every x works.
+        return isZero(s) || hasMatchingIn(x, s * t, udivDividendsEnd(s, t));
+      }
+      // s / x = t: for t = ones, x = 0, or x = 1 if s = ones; otherwise x in
+      // [s / (t + 1) + 1, s / t].
+      if (isOnes(t))
+      {
+        return x.matches(LsValue::mkZero(w))
+               || (isOnes(s) && x.matches(LsValue::mkOne(w)));
+      }
+      return hasMatchingIn(
+          x, inc(s.unsignedDivTotal(inc(t))), s.unsignedDivTotal(t));
+    }
     case LsKind::UREM:
       Unimplemented() << "invertibility modulo constant bits for " << op.kind;
     case LsKind::CONST:
@@ -899,7 +1130,48 @@ LsValue inverseFixedBits(const OpInfo& op,
           x, LsValue(w, w - shiftZeros(s, left)), LsValue::mkOnes(w), rng);
     }
     case LsKind::MUL:
+    {
+      const LsValue& s = *ch[1 - posX];
+      if (isZero(s))
+      {
+        return pick(x, rng);
+      }
+      // The low w - c bits from y, which match x; the top c bits are drawn
+      // and then forced to the fixed bits of x.
+      return x.apply(invMul(s, t, rng));
+    }
     case LsKind::UDIV:
+    {
+      const LsValue& s = *ch[1 - posX];
+      if (posX == 0)
+      {
+        if (isZero(s))
+        {
+          return pick(x, rng);
+        }
+        // The smallest dividend with the probability of the base rule.
+        LsValue lo = s * t;
+        if (rng.pickWithProb(kProbUdivLo) && x.matches(lo))
+        {
+          return lo;
+        }
+        return pick(x, lo, udivDividendsEnd(s, t), rng);
+      }
+      if (isOnes(t))
+      {
+        LsValue zero = LsValue::mkZero(w);
+        LsValue one = LsValue::mkOne(w);
+        bool z = x.matches(zero);
+        bool o = isOnes(s) && x.matches(one);
+        if (z && o)
+        {
+          return rng.randomInRange(zero, one);
+        }
+        return z ? zero : one;
+      }
+      return pick(
+          x, inc(s.unsignedDivTotal(inc(t))), s.unsignedDivTotal(t), rng);
+    }
     case LsKind::UREM:
       Unimplemented() << "inverse value modulo constant bits for " << op.kind;
     case LsKind::CONST:
@@ -1029,8 +1301,26 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
       }
       return pick(x, LsValue::mkZero(w), maxAmount, rng);
     }
-    case LsKind::MUL:
+    case LsKind::MUL: return mulConsistent(x, t, rng);
     case LsKind::UDIV:
+    {
+      if (posX == 0)
+      {
+        return udivConsistent(x, t, rng);
+      }
+      // s' / x = t: Table V. For t = ones, x in {0, 1} (s' / 0, ones / 1);
+      // otherwise x in [1, ones / t], those with x * t <= ones (s' = x * t).
+      LsValue one = LsValue::mkOne(w);
+      DomainSampler sampler =
+          isOnes(t)
+              ? DomainSampler(x, LsValue::mkZero(w), one)
+              : DomainSampler(x, one, LsValue::mkOnes(w).unsignedDivTotal(t));
+      if (sampler.empty())
+      {
+        return std::nullopt;
+      }
+      return sampler.random(rng);
+    }
     case LsKind::UREM:
       Unimplemented() << "consistent value modulo constant bits for "
                       << op.kind;
