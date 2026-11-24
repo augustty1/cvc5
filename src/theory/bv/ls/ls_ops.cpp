@@ -10,6 +10,8 @@
 
 #include "theory/bv/ls/ls_ops.h"
 
+#include <algorithm>
+#include <optional>
 #include <ostream>
 #include <utility>
 
@@ -1751,6 +1753,154 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
   return v;
 }
 
+namespace {
+
+/*
+ * The domains of operators whose exact domain is not a simple bitwise
+ * function of their operands' domains (plan Sec. 5.2, D23). Each is sound:
+ * the value of the operator on any values that match the operands' domains
+ * matches it. They are word-level "known bits" rules in the spirit of the
+ * word-level propagators that FMCAD'20 Sec. IV-B leaves to future work.
+ */
+
+/**
+ * Return the domain of the values in [a, b]: their common leading bits are
+ * fixed. Requires a <= b.
+ */
+TernaryDomain intervalD(const LsValue& a, const LsValue& b)
+{
+  Assert(a.unsignedLessThanEq(b));
+  if (a == b)
+  {
+    return TernaryDomain::fixed(a);
+  }
+  // a and b agree above their highest differing bit, and so does every
+  // value between them.
+  LsValue low = LsValue::mkOnes(a.getSize()).logicalRightShift(clz(a ^ b));
+  return TernaryDomain(a & ~low, a | low);
+}
+
+/**
+ * The domain of v + u (LLVM's KnownBits::computeForAddSub). The sum of the
+ * largest values x^hi + y^hi has the largest carries and the sum of the
+ * smallest x^lo + y^lo the smallest, so a carry is known where it is 0 in
+ * the former or 1 in the latter; a bit of the sum is known where both
+ * operand bits and the carry into it are known.
+ *
+ * This is exact. If an operand bit i is free, flipping it flips bit i of the
+ * sum and not the carry into it. The carry into bit i is the carry out of the
+ * sum of the low i bits, which grows with both operands, so it is the same
+ * for all values iff it is the same for the smallest and the largest.
+ */
+TernaryDomain addD(const TernaryDomain& x, const TernaryDomain& y)
+{
+  LsValue sumHi = x.hi() + y.hi();
+  LsValue sumLo = x.lo() + y.lo();
+  LsValue carryKnown = ~(sumHi ^ x.hi() ^ y.hi()) | (sumLo ^ x.lo() ^ y.lo());
+  LsValue known = ~x.freeMask() & ~y.freeMask() & carryKnown;
+  return TernaryDomain(sumLo & known, sumHi | ~known);
+}
+
+/**
+ * The domain of v * u: the product has at least ctz(x^hi) + ctz(y^hi)
+ * trailing zeros; its low k bits depend only on the low k bits of the
+ * operands, so they are fixed if those are; and if the largest product does
+ * not overflow, the product lies in [x^lo * y^lo, x^hi * y^hi].
+ */
+TernaryDomain mulD(const TernaryDomain& x, const TernaryDomain& y)
+{
+  uint32_t w = x.getSize();
+  uint32_t zeros = std::min(w, ctz(x.hi()) + ctz(y.hi()));
+  uint32_t lowFixed = std::min(ctz(x.freeMask()), ctz(y.freeMask()));
+  uint32_t k = std::max(zeros, lowFixed);
+  LsValue product = x.lo() * y.lo();
+  LsValue mask =
+      k == 0 ? LsValue::mkZero(w) : LsValue::mkOnes(w).logicalRightShift(w - k);
+  TernaryDomain res(product & mask, product | ~mask);
+  if (!umulOverflow(x.hi(), y.hi()))
+  {
+    std::optional<TernaryDomain> m =
+        meet(res, intervalD(product, x.hi() * y.hi()));
+    Assert(m);
+    res = *m;
+  }
+  return res;
+}
+
+/**
+ * The domain of v / u (with v / 0 = ones): the quotient lies in [x^lo / y^hi,
+ * x^hi / y^lo], or in [x^lo / y^hi, ones] if u can be 0.
+ */
+TernaryDomain udivD(const TernaryDomain& x, const TernaryDomain& y)
+{
+  uint32_t w = x.getSize();
+  LsValue ones = LsValue::mkOnes(w);
+  if (isZero(y.hi()))
+  {
+    return TernaryDomain::fixed(ones);  // u = 0
+  }
+  LsValue lb = x.lo().unsignedDivTotal(y.hi());
+  LsValue ub = isZero(y.lo()) ? ones : x.hi().unsignedDivTotal(y.lo());
+  return intervalD(lb, ub);
+}
+
+/**
+ * The domain of v mod u (with v mod 0 = v): v itself if v < u always; the
+ * low bits of v if u is a fixed power of two; otherwise the remainder is at
+ * most x^hi, and below y^hi if u cannot be 0.
+ */
+TernaryDomain uremD(const TernaryDomain& x, const TernaryDomain& y)
+{
+  uint32_t w = x.getSize();
+  if (x.hi().unsignedLessThan(y.lo()) || (y.isFixed() && isZero(y.lo())))
+  {
+    return x;
+  }
+  if (y.isFixed() && popcount(y.lo()) == 1)
+  {
+    LsValue mask = dec(y.lo());
+    return TernaryDomain(x.lo() & mask, x.hi() & mask);
+  }
+  LsValue ub = x.hi();
+  if (!isZero(y.lo()) && dec(y.hi()).unsignedLessThan(ub))
+  {
+    ub = dec(y.hi());
+  }
+  return intervalD(LsValue::mkZero(w), ub);
+}
+
+/**
+ * The domain of v << u (left) or v >> u: the join of the exact domains for
+ * each shift amount k <= w that u can take (amounts of w or more give 0).
+ */
+TernaryDomain shiftD(const TernaryDomain& x,
+                     const TernaryDomain& amount,
+                     bool left)
+{
+  uint32_t w = x.getSize();
+  std::optional<TernaryDomain> res;
+  for (uint32_t k = 0; k <= w; ++k)
+  {
+    bool possible =
+        k < w ? amount.matches(LsValue(w, k))
+              : hasMatchingIn(amount, LsValue(w, w), LsValue::mkOnes(w));
+    if (!possible)
+    {
+      continue;
+    }
+    TernaryDomain d = left ? shlD(x, k) : lshrD(x, k);
+    res = res ? join(*res, d) : d;
+    if (!res->hasFixedBits())
+    {
+      break;  // it cannot become more precise
+    }
+  }
+  Assert(res);
+  return *res;
+}
+
+}  // namespace
+
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
 {
   Assert(doms.size() == arity(op.kind));
@@ -1780,12 +1930,13 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
     case LsKind::LSHR:
     {
       const TernaryDomain& amount = *doms[1];
-      if (!amount.isFixed())
+      bool left = op.kind == LsKind::SHL;
+      if (amount.isFixed())
       {
-        break;
+        uint32_t k = shiftAmount(amount.lo(), x.getSize());
+        return left ? shlD(x, k) : lshrD(x, k);
       }
-      uint32_t k = shiftAmount(amount.lo(), x.getSize());
-      return op.kind == LsKind::SHL ? shlD(x, k) : lshrD(x, k);
+      return shiftD(x, amount, left);
     }
     case LsKind::ITE:
       // The selected branch if the condition is fixed, else either branch.
@@ -1795,16 +1946,31 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
       }
       return join(*doms[1], *doms[2]);
     case LsKind::EQ:
-    case LsKind::ULT: return TernaryDomain::full(1);
-    case LsKind::ADD:
-    case LsKind::MUL:
-    case LsKind::UDIV:
-    case LsKind::UREM: break;
+      // False if no value matches both; true only if both are fixed.
+      return meet(x, *doms[1]) ? TernaryDomain::full(1)
+                               : TernaryDomain::fixed(LsValue(1, 0u));
+    case LsKind::ULT:
+    {
+      // lo is the smallest and hi the largest matching value.
+      const TernaryDomain& y = *doms[1];
+      if (x.hi().unsignedLessThan(y.lo()))
+      {
+        return TernaryDomain::fixed(LsValue(1, 1u));
+      }
+      if (!x.lo().unsignedLessThan(y.hi()))
+      {
+        return TernaryDomain::fixed(LsValue(1, 0u));
+      }
+      return TernaryDomain::full(1);
+    }
+    case LsKind::ADD: return addD(x, *doms[1]);
+    case LsKind::MUL: return mulD(x, *doms[1]);
+    case LsKind::UDIV: return udivD(x, *doms[1]);
+    case LsKind::UREM: return uremD(x, *doms[1]);
     case LsKind::CONST:
-    case LsKind::VAR:
-      Unreachable() << "forwardDomain called on leaf kind " << op.kind;
+    case LsKind::VAR: break;
   }
-  return TernaryDomain::full(x.getSize());
+  Unreachable() << "forwardDomain called on leaf kind " << op.kind;
 }
 
 }  // namespace ls

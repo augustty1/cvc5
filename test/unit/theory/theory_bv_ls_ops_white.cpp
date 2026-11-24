@@ -1817,13 +1817,9 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain)
   {
     for (const auto& [op, widths] : allOps(w))
     {
-      if (w == 3 && (op.kind == LsKind::ITE || widths.size() == 2))
+      if (w == 3 && op.kind == LsKind::ITE)
       {
-        // Width 3 only for the unary operators and for one cheap binary one.
-        if (op.kind != LsKind::AND)
-        {
-          continue;
-        }
+        continue;  // three children: width 2 is enough
       }
       std::vector<std::vector<LsValue>> assignments = allAssignments(widths);
       for (const std::vector<TernaryDomain>& ds : allDomainTuples(widths))
@@ -1859,17 +1855,14 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain)
           }
         }
 
+        // MUL, UDIV and UREM are only sound; the others are exact.
         bool exact = allFixed;
         switch (op.kind)
         {
-          case LsKind::NOT:
-          case LsKind::AND:
-          case LsKind::CONCAT:
-          case LsKind::EXTRACT:
-          case LsKind::ITE: exact = true; break;
-          case LsKind::SHL:
-          case LsKind::LSHR: exact = exact || ds[1].isFixed(); break;
-          default: break;
+          case LsKind::MUL:
+          case LsKind::UDIV:
+          case LsKind::UREM: break;
+          default: exact = true; break;
         }
         if (allFixed)
         {
@@ -1889,9 +1882,104 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain)
             ASSERT_EQ(fd.isFixedFalse(i), all0) << ctx.str() << " bit " << i;
           }
         }
-        else
+      }
+    }
+  }
+}
+
+/**
+ * The known bits of the domains of ADD, MUL, UDIV and UREM, and of shifts by
+ * an amount that is not fixed, EQ and ULT (Step 6, plan Sec. 5.2): examples
+ * where the bits that the rules should find are found.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, forward_domain_known_bits)
+{
+  auto fd = [](LsKind k, const char* a, const char* b) {
+    TernaryDomain x = TernaryDomain::fromString(a);
+    TernaryDomain y = TernaryDomain::fromString(b);
+    return forwardDomain({k}, {&x, &y}).toString();
+  };
+  // x even plus 1 is odd; low bits 00 plus 01 are 01.
+  ASSERT_EQ(fd(LsKind::ADD, "xxx0", "0001"), "xxx1");
+  ASSERT_EQ(fd(LsKind::ADD, "xx00", "0001"), "xx01");
+  // Known carries: 0x00 + 0x00 has no carry out of bit 0 or into bit 3.
+  ASSERT_EQ(fd(LsKind::ADD, "0x00", "0x00"), "xx00");
+  // Even times even is a multiple of 4; two and one trailing zeros give
+  // three.
+  ASSERT_EQ(fd(LsKind::MUL, "xxx0", "xxx0"), "xx00");
+  ASSERT_EQ(fd(LsKind::MUL, "xx00", "xxx0"), "x000");
+  // Low bits fixed in both: 01 times 11 is 11.
+  ASSERT_EQ(fd(LsKind::MUL, "xx01", "xx11"), "xx11");
+  // Small operands do not overflow: [0, 3 * 3] has the leading 0 fixed.
+  ASSERT_EQ(fd(LsKind::MUL, "00xx", "00xx"), "xxxx");
+  ASSERT_EQ(fd(LsKind::MUL, "000x", "00xx"), "00xx");
+  // A divisor of at least 4 leaves a quotient of at most 3.
+  ASSERT_EQ(fd(LsKind::UDIV, "xxxx", "x1xx"), "00xx");
+  // A divisor in {2, 3} leaves a remainder of at most 2.
+  ASSERT_EQ(fd(LsKind::UREM, "xxxx", "001x"), "00xx");
+  // A divisor fixed to 4 leaves the low two bits of x.
+  ASSERT_EQ(fd(LsKind::UREM, "x1x0", "0100"), "00x0");
+  // x < y always: x mod y = x.
+  ASSERT_EQ(fd(LsKind::UREM, "00x1", "1xxx"), "00x1");
+  // Shifting by 2 or 3 clears the low two bits.
+  ASSERT_EQ(fd(LsKind::SHL, "xxxx", "001x"), "xx00");
+  ASSERT_EQ(fd(LsKind::LSHR, "xxxx", "001x"), "00xx");
+  // Disjoint domains are never equal; separated ranges compare fixed.
+  ASSERT_EQ(fd(LsKind::EQ, "1xxx", "0xxx"), "0");
+  ASSERT_EQ(fd(LsKind::EQ, "1xxx", "xxx0"), "x");
+  ASSERT_EQ(fd(LsKind::ULT, "00xx", "1xxx"), "1");
+  ASSERT_EQ(fd(LsKind::ULT, "1xxx", "0xxx"), "0");
+  ASSERT_EQ(fd(LsKind::ULT, "x0xx", "x1xx"), "x");
+}
+
+/**
+ * The domains of the operators are sound at larger widths, including the
+ * multi-word ones: on random domains (some with few free bits) and random
+ * values that match them, the value of the operator matches its domain.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, forward_domain_wide)
+{
+  LsRng gen(73);
+  for (uint32_t w : {5u, 8u, 16u, 64u, 65u, 128u})
+  {
+    for (LsKind k : {LsKind::AND,
+                     LsKind::EQ,
+                     LsKind::ULT,
+                     LsKind::ADD,
+                     LsKind::MUL,
+                     LsKind::UDIV,
+                     LsKind::UREM,
+                     LsKind::SHL,
+                     LsKind::LSHR})
+    {
+      for (uint32_t r = 0; r < 200; ++r)
+      {
+        std::vector<TernaryDomain> ds;
+        for (uint32_t i = 0; i < 2; ++i)
         {
-          ASSERT_FALSE(fd.hasFixedBits()) << ctx.str();
+          LsValue fixed = gen.randomValue(w);
+          if (r % 3 == 1)
+          {
+            fixed = fixed | gen.randomValue(w) | gen.randomValue(w);
+          }
+          else if (r % 3 == 2)
+          {
+            // Small values: only the low bits free.
+            fixed = ~LsValue::mkOnes(w).logicalRightShift(w - (w < 8 ? 2 : 6));
+          }
+          LsValue bits = gen.randomValue(w) & fixed;
+          ds.emplace_back(bits, bits | ~fixed);
+        }
+        LsDomains doms{&ds[0], &ds[1]};
+        TernaryDomain fd = forwardDomain({k}, doms);
+        for (uint32_t i = 0; i < 20; ++i)
+        {
+          LsValue a = ds[0].apply(gen.randomValue(w));
+          LsValue b = ds[1].apply(gen.randomValue(w));
+          LsValue v = evaluate({k}, {&a, &b});
+          ASSERT_TRUE(fd.matches(v))
+              << k << " w=" << w << " x=" << ds[0] << " y=" << ds[1]
+              << " domain=" << fd << " a=" << a << " b=" << b << " v=" << v;
         }
       }
     }

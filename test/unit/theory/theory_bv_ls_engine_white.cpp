@@ -417,26 +417,45 @@ TEST_F(TestTheoryWhiteBvLsEngine, const_bits_false_root)
 
 /**
  * FMCAD'20 Sec. IV: with x even (domain x0), x * s = 01 has neither an
- * inverse nor a consistent value for x, so propagating to x is a conflict
- * (Fig. 2, lines 5-6). The formula is unsatisfiable; the search never ends
- * with a wrong SAT, and it records conflicts at the MUL node.
+ * inverse nor a consistent value for x. Since Step 6 the domains alone show
+ * it: the product is even, so the root is the constant false and solve stops
+ * at once.
+ *
+ * A conflict during the search (Fig. 2, lines 5-6): in ite(c, b, a) = 11 with
+ * a in 0x and b in 1x, while c selects a, propagating 11 to the branch a has
+ * no consistent value (plan D11). The formula is satisfiable (c true, b =
+ * 11); the search records conflicts at the ITE and finds a model.
  */
 TEST_F(TestTheoryWhiteBvLsEngine, const_bits_conflict)
 {
-  for (uint64_t seed = 0; seed < 10; ++seed)
+  {
+    LsEngine e(1, constBitsConfig());
+    uint32_t even = e.mkOp(LsKind::CONCAT, {mkVar(e, 1), mkConst(e, 1, 0)});
+    ASSERT_EQ(e.domain(even).toString(), "x0");
+    uint32_t mul = e.mkOp(LsKind::MUL, {even, mkVar(e, 2)});
+    ASSERT_EQ(e.domain(mul).toString(), "x0");
+    uint32_t root = e.mkOp(LsKind::EQ, {mul, mkConst(e, 2, 0b01)});
+    ASSERT_TRUE(e.isConst(root));
+    e.setRoots({root});
+    ASSERT_EQ(e.solve(1000, 0), LsResult::UNKNOWN);
+    ASSERT_EQ(e.stats().props, 0u);
+  }
+  uint64_t conflicts = 0;
+  for (uint64_t seed = 0; seed < 20; ++seed)
   {
     LsEngine e(seed, constBitsConfig());
     e.setCheckInvariants(true);
-    uint32_t even = e.mkOp(LsKind::CONCAT, {mkVar(e, 1), mkConst(e, 1, 0)});
-    ASSERT_EQ(e.domain(even).toString(), "x0");
-    uint32_t s = mkVar(e, 2);
-    uint32_t mul = e.mkOp(LsKind::MUL, {even, s});
-    e.setRoots({e.mkOp(LsKind::EQ, {mul, mkConst(e, 2, 0b01)})});
-    ASSERT_EQ(e.solve(1000, 0), LsResult::UNKNOWN);
-    ASSERT_GT(e.stats().conflicts, 0u);
-    ASSERT_GT(e.stats().conflictsByKind[static_cast<uint32_t>(LsKind::MUL)],
-              0u);
+    uint32_t a = e.mkOp(LsKind::CONCAT, {mkConst(e, 1, 0), mkVar(e, 1)});
+    uint32_t b = e.mkOp(LsKind::CONCAT, {mkConst(e, 1, 1), mkVar(e, 1)});
+    uint32_t c = mkVar(e, 1);
+    uint32_t ite = e.mkOp(LsKind::ITE, {c, b, a});
+    uint32_t root = e.mkOp(LsKind::EQ, {ite, mkConst(e, 2, 0b11)});
+    e.setRoots({root});
+    ASSERT_EQ(e.solve(1000, 0), LsResult::SAT) << "seed " << seed;
+    ASSERT_TRUE(e.value(root).isBitSet(0));
+    conflicts += e.stats().conflictsByKind[static_cast<uint32_t>(LsKind::ITE)];
   }
+  ASSERT_GT(conflicts, 0u);
 }
 
 /**

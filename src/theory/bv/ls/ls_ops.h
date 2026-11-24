@@ -258,9 +258,11 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
 
 /**
  * Return a domain that the value of op matches whenever the values of its
- * children match doms, computed at the word level. It is exact for NOT, AND,
- * CONCAT, EXTRACT and ITE, for shifts by a fixed amount, and when all
- * children are fixed; otherwise it has no fixed bits.
+ * children match doms, computed at the word level (plan Sec. 5.2). It is
+ * exact (a bit is fixed iff it is the same for all those values) for NOT,
+ * AND, ADD, CONCAT, EXTRACT, ITE, SHL, LSHR, EQ and ULT, and when all children
+ * are fixed. For MUL, UDIV and UREM it fixes the bits that "known bits" rules
+ * and the bounds of the result determine, which may be fewer.
  */
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 
