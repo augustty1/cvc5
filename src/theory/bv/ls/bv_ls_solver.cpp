@@ -61,6 +61,16 @@ BvLsSolver::BvLsSolver(Env& env)
           statisticsRegistry().registerInt("theory::bv::ls::numConflicts")),
       d_numRoots(statisticsRegistry().registerInt("theory::bv::ls::numRoots")),
       d_numNodes(statisticsRegistry().registerInt("theory::bv::ls::numNodes")),
+      d_numNodesWithFixedBits(statisticsRegistry().registerInt(
+          "theory::bv::ls::numNodesWithFixedBits")),
+      d_numBitsFixed(
+          statisticsRegistry().registerInt("theory::bv::ls::numBitsFixed")),
+      d_numBitsTotal(
+          statisticsRegistry().registerInt("theory::bv::ls::numBitsTotal")),
+      d_numFixedOps(
+          statisticsRegistry().registerInt("theory::bv::ls::numFixedOps")),
+      d_conflictsByKind(statisticsRegistry().registerHistogram<LsKind>(
+          "theory::bv::ls::conflictsByKind")),
       d_timeTranslate(
           statisticsRegistry().registerTimer("theory::bv::ls::timeTranslate")),
       d_timeSearch(
@@ -106,9 +116,23 @@ prop::SatValue BvLsSolver::check(const std::vector<Node>& facts)
   d_numPropsCons += after.propsCons - before.propsCons;
   d_numUpdates += after.updates - before.updates;
   d_numConflicts += after.conflicts - before.conflicts;
+  for (uint32_t k = 0; k < kNumLsKinds; ++k)
+  {
+    for (uint64_t i = before.conflictsByKind[k]; i < after.conflictsByKind[k];
+         ++i)
+    {
+      d_conflictsByKind << static_cast<LsKind>(k);
+    }
+  }
+  const LsDomainStats& dom = d_engine.domainStats();
+  d_numNodesWithFixedBits = dom.nodesWithFixedBits;
+  d_numBitsFixed = dom.bitsFixed;
+  d_numBitsTotal = dom.bitsTotal;
+  d_numFixedOps = d_engine.numFixedOps();
   Trace("bv-ls") << "bv-ls: " << (res == LsResult::SAT ? "sat" : "unknown")
                  << " after " << (after.props - before.props) << " props, "
-                 << (after.moves - before.moves) << " moves" << std::endl;
+                 << (after.moves - before.moves) << " moves, " << dom.bitsFixed
+                 << " of " << dom.bitsTotal << " bits fixed" << std::endl;
 
   if (res != LsResult::SAT)
   {

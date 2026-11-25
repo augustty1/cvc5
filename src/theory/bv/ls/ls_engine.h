@@ -172,7 +172,10 @@ class LsEngine
   /** Return the constant bits of the nodes reachable from the roots. */
   const LsDomainStats& domainStats() const { return d_domainStats; }
 
-  /** Return the number of operator nodes that became constants (D14). */
+  /**
+   * Return the number of operator nodes that became constants because their
+   * domain is fixed although some child is not a constant (D20).
+   */
   uint64_t numFixedOps() const { return d_numFixedOps; }
 
   /** Return the number of nodes. */

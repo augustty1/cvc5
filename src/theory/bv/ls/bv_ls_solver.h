@@ -133,6 +133,20 @@ class BvLsSolver : protected EnvObj
   IntStat d_numConflicts;
   IntStat d_numRoots;
   IntStat d_numNodes;
+  /*
+   * With --bv-ls-const-bits: the constant bits of the nodes reachable from
+   * the roots that are not constants (variables have none), in the last
+   * check (as d_numRoots and d_numNodes), and the operator nodes that became
+   * constants because their domain is fixed although some child is not a
+   * constant (plan D20). The domains are computed when the nodes are created,
+   * so their cost is part of d_timeTranslate.
+   */
+  IntStat d_numNodesWithFixedBits;
+  IntStat d_numBitsFixed;
+  IntStat d_numBitsTotal;
+  IntStat d_numFixedOps;
+  /** The conflicts by the kind of the node where they happened. */
+  HistogramStat<LsKind> d_conflictsByKind;
   TimerStat d_timeTranslate;
   TimerStat d_timeSearch;
 };

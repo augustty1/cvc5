@@ -14,10 +14,12 @@
 
 #include "expr/skolem_manager.h"
 #include "options/bv_options.h"
+#include "smt/solver_engine.h"
 #include "test_smt.h"
 #include "theory/bv/ls/bv_ls_solver.h"
 #include "theory/bv/theory_bv_utils.h"
 #include "util/bitvector.h"
+#include "util/statistics_registry.h"
 
 namespace cvc5::internal {
 
@@ -282,6 +284,82 @@ TEST_F(TestTheoryWhiteBvLsSolverConstBits, check_and_model)
   ASSERT_EQ(ls.check({f}), prop::SAT_VALUE_TRUE);
   ASSERT_EQ(ls.getValue(a).getConst<BitVector>(), BitVector(4, 3u));
   ASSERT_EQ(ls.check({f, nm->mkConst(false)}), prop::SAT_VALUE_UNKNOWN);
+}
+
+/**
+ * The statistics of constant bits (plan Step 7). In a * 0001 ... the nodes
+ * reachable from the root of x * 3 = 147 are a (4 free bits), x = a o 0001
+ * (domain xxxx0001), x * 3 (xxxx0011: the low bits of the operands are
+ * fixed) and the equality (free): 8 of 21 bits fixed, in 2 nodes. The fact
+ * (x & 0) = 0 folds to the constant true (the AND is fixed 0, then the EQ is
+ * fixed 1). The AND counts as a node that became a constant by its domain;
+ * the EQ of two constants is folded as in ls-base and does not count. The
+ * fact is no root.
+ * The conflicts by kind add up to the conflicts.
+ */
+TEST_F(TestTheoryWhiteBvLsSolverConstBits, statistics)
+{
+  BvLsSolver ls(d_slvEngine->getEnv());
+  StatisticsRegistry& reg = d_slvEngine->getEnv().getStatisticsRegistry();
+  auto stat = [&reg](const char* name) {
+    return reg.registerInt(std::string("theory::bv::ls::") + name).get();
+  };
+  NodeManager* nm = d_nodeManager.get();
+  Node a = nm->mkVar("a", nm->mkBitVectorType(4));
+  Node x = nm->mkNode(Kind::BITVECTOR_CONCAT, a, nm->mkConst(BitVector(4, 1u)));
+  Node f = nm->mkNode(
+      Kind::EQUAL,
+      nm->mkNode(Kind::BITVECTOR_MULT, x, nm->mkConst(BitVector(8, 3u))),
+      nm->mkConst(BitVector(8, 147u)));
+  Node zero = nm->mkConst(BitVector(8, 0u));
+  Node g =
+      nm->mkNode(Kind::EQUAL, nm->mkNode(Kind::BITVECTOR_AND, x, zero), zero);
+  ASSERT_EQ(ls.check({f, g}), prop::SAT_VALUE_TRUE);
+  ASSERT_EQ(stat("numRoots"), 1);
+  ASSERT_EQ(stat("numBitsFixed"), 8);
+  ASSERT_EQ(stat("numBitsTotal"), 21);
+  ASSERT_EQ(stat("numNodesWithFixedBits"), 2);
+  ASSERT_EQ(stat("numFixedOps"), 1);
+
+  // ite(c, 1 o p, 0 o q) = 11: while c selects the else branch, the target 11
+  // has no consistent value in 0x (as in the engine test const_bits_conflict).
+  Node c = nm->mkVar("c", nm->booleanType());
+  Node p = nm->mkVar("p", nm->mkBitVectorType(1));
+  Node q = nm->mkVar("q", nm->mkBitVectorType(1));
+  Node h = nm->mkNode(
+      Kind::EQUAL,
+      nm->mkNode(
+          Kind::ITE,
+          c,
+          nm->mkNode(Kind::BITVECTOR_CONCAT, nm->mkConst(BitVector(1, 1u)), p),
+          nm->mkNode(Kind::BITVECTOR_CONCAT, nm->mkConst(BitVector(1, 0u)), q)),
+      nm->mkConst(BitVector(2, 3u)));
+  // Conflicts are rare (the condition is essential while it selects the else
+  // branch), so try several seeds, each with its own engine.
+  int64_t conflicts = 0;
+  for (uint32_t seed = 0; seed < 20; ++seed)
+  {
+    SolverEngine slv(nm);
+    slv.setOption("bv-ls-const-bits", "true");
+    slv.setOption("seed", std::to_string(seed));
+    slv.finishInit();
+    BvLsSolver lsSeed(slv.getEnv());
+    ASSERT_EQ(lsSeed.check({h}), prop::SAT_VALUE_TRUE);
+    ASSERT_TRUE(lsSeed.getValue(c).getConst<bool>());
+    StatisticsRegistry& r = slv.getEnv().getStatisticsRegistry();
+    int64_t n = r.registerInt("theory::bv::ls::numConflicts").get();
+    HistogramStat<LsKind> byKind =
+        r.registerHistogram<LsKind>("theory::bv::ls::conflictsByKind");
+    int64_t sum = 0;
+    for (uint32_t k = 0; k < kNumLsKinds; ++k)
+    {
+      sum += byKind.getValue(static_cast<LsKind>(k));
+    }
+    ASSERT_EQ(sum, n) << "seed " << seed;
+    ASSERT_EQ(static_cast<int64_t>(byKind.getValue(LsKind::ITE)), n);
+    conflicts += n;
+  }
+  ASSERT_GT(conflicts, 0);
 }
 
 }  // namespace test
