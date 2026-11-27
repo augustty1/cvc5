@@ -130,6 +130,10 @@ TEST_F(TestTheoryWhiteBvLsEngine, hash_consing_and_folding)
             e.mkOp(LsKind::EXTRACT, {x}, 3, 0));
   ASSERT_NE(e.mkOp(LsKind::EXTRACT, {x}, 3, 0),
             e.mkOp(LsKind::EXTRACT, {x}, 4, 1));
+  // SEXT keeps its number of added bits.
+  ASSERT_EQ(e.mkOp(LsKind::SEXT, {x}, 2), e.mkOp(LsKind::SEXT, {x}, 2));
+  ASSERT_NE(e.mkOp(LsKind::SEXT, {x}, 2), e.mkOp(LsKind::SEXT, {x}, 3));
+  ASSERT_EQ(e.value(e.mkOp(LsKind::SEXT, {c4}, 3)), LsValue(11, 4u));
 
   uint32_t sum = e.mkOp(LsKind::ADD, {c3, c4});
   ASSERT_TRUE(e.isConst(sum));

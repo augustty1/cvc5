@@ -42,6 +42,7 @@ const char* toString(LsKind k)
     case LsKind::EXTRACT: return "EXTRACT";
     case LsKind::ITE: return "ITE";
     case LsKind::XOR: return "XOR";
+    case LsKind::SEXT: return "SEXT";
   }
   Unreachable();
 }
@@ -58,7 +59,8 @@ uint32_t arity(LsKind k)
     case LsKind::CONST:
     case LsKind::VAR: return 0;
     case LsKind::NOT:
-    case LsKind::EXTRACT: return 1;
+    case LsKind::EXTRACT:
+    case LsKind::SEXT: return 1;
     case LsKind::AND:
     case LsKind::EQ:
     case LsKind::ULT:
@@ -79,6 +81,12 @@ namespace {
 
 /** Return the width-1 value of b. */
 LsValue mkBool(bool b) { return LsValue(1, b ? 1 : 0); }
+
+/** Return x sign-extended by n >= 1 bits. */
+LsValue signExtend(const LsValue& x, uint32_t n)
+{
+  return (msb(x) ? LsValue::mkOnes(n) : LsValue::mkZero(n)).concat(x);
+}
 
 /*
  * Probabilities (per mille) of the biased choices inside the rules. Neither
@@ -169,6 +177,7 @@ LsValue evaluate(const OpInfo& op, const LsChildren& ch)
       Assert(ch[1]->getSize() == ch[2]->getSize());
       return ch[0]->isBitSet(0) ? *ch[1] : *ch[2];
     case LsKind::XOR: return *ch[0] ^ *ch[1];
+    case LsKind::SEXT: Assert(op.hi >= 1); return signExtend(*ch[0], op.hi);
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -186,6 +195,16 @@ LsValue concatPartOf(uint32_t posX, const LsValue& t, const LsChildren& ch)
     return t.extract(w - 1, ch[1]->getSize());
   }
   return t.extract(ch[1]->getSize() - 1, 0);
+}
+
+/**
+ * For SEXT: return true if t is the sign extension of a value of width w, i.e.,
+ * its bits from w - 1 up are all 0 or all 1 (FMCAD'20 Table III).
+ */
+bool isSignExtension(const LsValue& t, uint32_t w)
+{
+  LsValue top = t.extract(t.getSize() - 1, w - 1);
+  return isZero(top) || isOnes(top);
 }
 
 /** For ITE: return true if posX is the branch selected by the condition. */
@@ -602,6 +621,8 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::UREM: return invUrem(posX, *ch[1 - posX], t, rng);
     // x ^ s = t: the only solution is s ^ t (XOR is commutative).
     case LsKind::XOR: return t ^ *ch[1 - posX];
+    // sext(x) = t: the only solution is the low w bits of t.
+    case LsKind::SEXT: return t.extract(w - 1, 0);
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -625,6 +646,7 @@ bool isInvertible(const OpInfo& op,
     case LsKind::EXTRACT:
     case LsKind::XOR: return true;
     case LsKind::AND: return (t & *ch[1 - posX]) == t;
+    case LsKind::SEXT: return isSignExtension(t, ch[0]->getSize());
     case LsKind::CONCAT:
     {
       // The other child must equal the rest of t.
@@ -720,6 +742,10 @@ LsValue consistentValue(const OpInfo& op,
     case LsKind::XOR: return rng.randomValue(w);
     case LsKind::CONCAT: return concatPartOf(posX, t, ch);
     case LsKind::EXTRACT: return setSlice(rng.randomValue(w), op.hi, op.lo, t);
+    case LsKind::SEXT:
+      // Unary: the only consistent value is the inverse value.
+      Assert(isInvertible(op, posX, t, ch));
+      return t.extract(w - 1, 0);
     case LsKind::ITE:
       // For a branch, t is consistent (with the condition selecting it).
       return posX == 0 ? rng.randomValue(1) : t;
@@ -1102,6 +1128,9 @@ bool icFixedBits(const OpInfo& op,
     case LsKind::CONCAT: return x.matches(concatPartOf(posX, t, ch));
     // x[u:l] = t: Table III, mcb(x[u:l], t).
     case LsKind::EXTRACT: return extractD(x, op.hi, op.lo).matches(t);
+    // sext(x) = t: Table III, the base condition (the top n + 1 bits of t are
+    // all 0 or all 1) and mcb(x, the low w bits of t).
+    case LsKind::SEXT: return x.matches(t.extract(x.getSize() - 1, 0));
     case LsKind::ITE:
       // Not in the paper (plan D16). For the condition, a branch equal to t
       // whose selecting value matches x; for a branch, it must be enabled
@@ -1276,6 +1305,7 @@ LsValue inverseFixedBits(const OpInfo& op,
     }
     case LsKind::ADD: return t - *ch[1 - posX];
     case LsKind::XOR: return t ^ *ch[1 - posX];
+    case LsKind::SEXT: return t.extract(w - 1, 0);
     case LsKind::CONCAT: return concatPartOf(posX, t, ch);
     case LsKind::EXTRACT:
       // The base rule (the bits outside [u:l] kept, drawn, or set to all 0s
@@ -1542,6 +1572,13 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
         return std::nullopt;
       }
       return x.apply(setSlice(rng.randomValue(w), op.hi, op.lo, t));
+    case LsKind::SEXT:
+    {
+      // Table V: the IC (unary); the low w bits of t are the only value.
+      LsValue v = t.extract(w - 1, 0);
+      return isSignExtension(t, w) && x.matches(v) ? std::optional<LsValue>(v)
+                                                   : std::nullopt;
+    }
     case LsKind::ITE:
       // Not in the paper (plan D16). Every condition is consistent. For a
       // branch the consistent value is t, if it matches x, as in the base
@@ -1751,9 +1788,14 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
   Assert(ch.size() == arity(op.kind));
   Assert(posX < ch.size());
   Assert(x.getSize() == ch[posX]->getSize());
+  if (op.kind == LsKind::SEXT && !isInvertible(op, posX, t, ch))
+  {
+    // t is not a sign extension: no value of x is consistent.
+    return std::nullopt;
+  }
   if (!x.hasFixedBits())
   {
-    // For the base operators a consistent value always exists.
+    // For the other base operators a consistent value always exists.
     return consistentValue(op, posX, t, ch, rng);
   }
   Assert(x.matches(*ch[posX]))
@@ -1823,6 +1865,21 @@ TernaryDomain xorD(const TernaryDomain& x, const TernaryDomain& y)
   LsValue known = ~x.freeMask() & ~y.freeMask();
   LsValue v = x.lo() ^ y.lo();
   return TernaryDomain(v & known, v | ~known);
+}
+
+/**
+ * The domain of v sign-extended by n bits: x below the n copies of its most
+ * significant bit, fixed if that bit is. This is exact: when the bit is free,
+ * each copy takes both values.
+ */
+TernaryDomain sextD(const TernaryDomain& x, uint32_t n)
+{
+  uint32_t m = x.getSize() - 1;
+  TernaryDomain top = !x.isFixedBit(m) ? TernaryDomain::full(n)
+                      : x.isFixedTrue(m)
+                          ? TernaryDomain::fixed(LsValue::mkOnes(n))
+                          : TernaryDomain::fixed(LsValue::mkZero(n));
+  return concatD(top, x);
 }
 
 /**
@@ -1950,6 +2007,7 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
     case LsKind::AND: return andD(x, *doms[1]);
     case LsKind::CONCAT: return concatD(x, *doms[1]);
     case LsKind::EXTRACT: return extractD(x, op.hi, op.lo);
+    case LsKind::SEXT: return sextD(x, op.hi);
     case LsKind::SHL:
     case LsKind::LSHR:
     {
