@@ -37,6 +37,10 @@ namespace ls {
  * in SMT-LIB: x / 0 = ones and x mod 0 = x. Shifts follow SMT-LIB: both
  * operands have the same width and shifting by w or more bits gives 0 (FMSD'17
  * instead restricts w to 2^q with a q-bit shift amount).
+ *
+ * The kinds after ITE are the operators that prop-c+ handles natively
+ * (FMCAD'20 Sec. V); without them the adapter encodes them with the base
+ * operators.
  */
 enum class LsKind
 {
@@ -55,10 +59,11 @@ enum class LsKind
   CONCAT,   // x o y, x is the most significant part
   EXTRACT,  // x[hi:lo]
   ITE,      // c ? x : y, c of width 1
+  XOR,      // x ^ y
 };
 
 /** The number of kinds. */
-constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::ITE) + 1;
+constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::XOR) + 1;
 
 const char* toString(LsKind k);
 std::ostream& operator<<(std::ostream& os, LsKind k);
@@ -260,9 +265,9 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
  * Return a domain that the value of op matches whenever the values of its
  * children match doms, computed at the word level (plan Sec. 5.2). It is
  * exact (a bit is fixed iff it is the same for all those values) for NOT,
- * AND, ADD, CONCAT, EXTRACT, ITE, SHL, LSHR, EQ and ULT, and when all children
- * are fixed. For MUL, UDIV and UREM it fixes the bits that "known bits" rules
- * and the bounds of the result determine, which may be fewer.
+ * AND, XOR, ADD, CONCAT, EXTRACT, ITE, SHL, LSHR, EQ and ULT, and when all
+ * children are fixed. For MUL, UDIV and UREM it fixes the bits that "known
+ * bits" rules and the bounds of the result determine, which may be fewer.
  */
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 

@@ -41,6 +41,7 @@ const char* toString(LsKind k)
     case LsKind::CONCAT: return "CONCAT";
     case LsKind::EXTRACT: return "EXTRACT";
     case LsKind::ITE: return "ITE";
+    case LsKind::XOR: return "XOR";
   }
   Unreachable();
 }
@@ -67,7 +68,8 @@ uint32_t arity(LsKind k)
     case LsKind::UREM:
     case LsKind::SHL:
     case LsKind::LSHR:
-    case LsKind::CONCAT: return 2;
+    case LsKind::CONCAT:
+    case LsKind::XOR: return 2;
     case LsKind::ITE: return 3;
   }
   Unreachable();
@@ -166,6 +168,7 @@ LsValue evaluate(const OpInfo& op, const LsChildren& ch)
       Assert(ch[0]->getSize() == 1);
       Assert(ch[1]->getSize() == ch[2]->getSize());
       return ch[0]->isBitSet(0) ? *ch[1] : *ch[2];
+    case LsKind::XOR: return *ch[0] ^ *ch[1];
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -597,6 +600,8 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::MUL: return invMul(*ch[1 - posX], t, rng);
     case LsKind::UDIV: return invUdiv(posX, *ch[1 - posX], t, rng);
     case LsKind::UREM: return invUrem(posX, *ch[1 - posX], t, rng);
+    // x ^ s = t: the only solution is s ^ t (XOR is commutative).
+    case LsKind::XOR: return t ^ *ch[1 - posX];
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -617,7 +622,8 @@ bool isInvertible(const OpInfo& op,
     case LsKind::NOT:
     case LsKind::EQ:
     case LsKind::ADD:
-    case LsKind::EXTRACT: return true;
+    case LsKind::EXTRACT:
+    case LsKind::XOR: return true;
     case LsKind::AND: return (t & *ch[1 - posX]) == t;
     case LsKind::CONCAT:
     {
@@ -710,7 +716,8 @@ LsValue consistentValue(const OpInfo& op,
     case LsKind::NOT: return ~t;
     case LsKind::AND: return t | rng.randomValue(w);
     case LsKind::EQ:
-    case LsKind::ADD: return rng.randomValue(w);
+    case LsKind::ADD:
+    case LsKind::XOR: return rng.randomValue(w);
     case LsKind::CONCAT: return concatPartOf(posX, t, ch);
     case LsKind::EXTRACT: return setSlice(rng.randomValue(w), op.hi, op.lo, t);
     case LsKind::ITE:
@@ -1088,6 +1095,8 @@ bool icFixedBits(const OpInfo& op,
     }
     // x + s = t: Table III, mcb(x, t - s).
     case LsKind::ADD: return x.matches(t - *ch[1 - posX]);
+    // x ^ s = t: Table III, mcb(x, s ^ t).
+    case LsKind::XOR: return x.matches(t ^ *ch[1 - posX]);
     // x o s = t, s o x = t: Table III, the base condition (s is the rest of
     // t) and mcb(x, the part of t for x).
     case LsKind::CONCAT: return x.matches(concatPartOf(posX, t, ch));
@@ -1266,6 +1275,7 @@ LsValue inverseFixedBits(const OpInfo& op,
       return t.isBitSet(0) ? s : pickNotEqual(x, s, rng);
     }
     case LsKind::ADD: return t - *ch[1 - posX];
+    case LsKind::XOR: return t ^ *ch[1 - posX];
     case LsKind::CONCAT: return concatPartOf(posX, t, ch);
     case LsKind::EXTRACT:
       // The base rule (the bits outside [u:l] kept, drawn, or set to all 0s
@@ -1516,7 +1526,8 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
       return x.apply(t | rng.randomValue(w));
     case LsKind::EQ:
     case LsKind::ADD:
-      // Table IV-V: true; every value is consistent.
+    case LsKind::XOR:
+      // Tables IV-V: true; every value is consistent.
       return pick(x, rng);
     case LsKind::CONCAT:
     {
@@ -1756,8 +1767,9 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
 namespace {
 
 /*
- * The domains of operators whose exact domain is not a simple bitwise
- * function of their operands' domains (plan Sec. 5.2, D23). Each is sound:
+ * The domains of the operators that ls_domain does not provide (plan Sec.
+ * 5.2, D23): XOR, and those whose exact domain is not a simple bitwise
+ * function of their operands' domains. Each is sound:
  * the value of the operator on any values that match the operands' domains
  * matches it. They are word-level "known bits" rules in the spirit of the
  * word-level propagators that FMCAD'20 Sec. IV-B leaves to future work.
@@ -1799,6 +1811,18 @@ TernaryDomain addD(const TernaryDomain& x, const TernaryDomain& y)
   LsValue carryKnown = ~(sumHi ^ x.hi() ^ y.hi()) | (sumLo ^ x.lo() ^ y.lo());
   LsValue known = ~x.freeMask() & ~y.freeMask() & carryKnown;
   return TernaryDomain(sumLo & known, sumHi | ~known);
+}
+
+/**
+ * The domain of v ^ u: a bit is fixed where it is fixed in both operands, to
+ * the exclusive or of the two. This is exact: a free operand bit flips the
+ * result bit.
+ */
+TernaryDomain xorD(const TernaryDomain& x, const TernaryDomain& y)
+{
+  LsValue known = ~x.freeMask() & ~y.freeMask();
+  LsValue v = x.lo() ^ y.lo();
+  return TernaryDomain(v & known, v | ~known);
 }
 
 /**
@@ -1964,6 +1988,7 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
       return TernaryDomain::full(1);
     }
     case LsKind::ADD: return addD(x, *doms[1]);
+    case LsKind::XOR: return xorD(x, *doms[1]);
     case LsKind::MUL: return mulD(x, *doms[1]);
     case LsKind::UDIV: return udivD(x, *doms[1]);
     case LsKind::UREM: return uremD(x, *doms[1]);
