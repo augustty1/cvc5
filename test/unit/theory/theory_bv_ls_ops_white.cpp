@@ -66,6 +66,7 @@ class TestTheoryWhiteBvLsOps : public TestInternal
       case LsKind::UREM: return b == 0 ? a : a % b;
       case LsKind::SHL: return b >= w ? 0 : (a << b) & mask;
       case LsKind::LSHR: return b >= w ? 0 : a >> b;
+      case LsKind::XOR: return a ^ b;
       default: break;
     }
     Unreachable();
@@ -289,7 +290,8 @@ class TestTheoryWhiteBvLsOps : public TestInternal
                      LsKind::UREM,
                      LsKind::SHL,
                      LsKind::LSHR,
-                     LsKind::CONCAT})
+                     LsKind::CONCAT,
+                     LsKind::XOR})
     {
       res.push_back({{k}, {w, w}});
     }
@@ -483,6 +485,7 @@ TEST_F(TestTheoryWhiteBvLsOps, arity_toString)
   ASSERT_EQ(arity(LsKind::CONCAT), 2u);
   ASSERT_EQ(arity(LsKind::ULT), 2u);
   ASSERT_EQ(arity(LsKind::ITE), 3u);
+  ASSERT_EQ(arity(LsKind::XOR), 2u);
   std::stringstream ss;
   ss << LsKind::LSHR;
   ASSERT_EQ(ss.str(), "LSHR");
@@ -499,7 +502,8 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_binary_exhaustive)
                    LsKind::UDIV,
                    LsKind::UREM,
                    LsKind::SHL,
-                   LsKind::LSHR})
+                   LsKind::LSHR,
+                   LsKind::XOR})
   {
     bool isPred = k == LsKind::EQ || k == LsKind::ULT;
     for (uint32_t w = 1; w <= 4; ++w)
@@ -603,6 +607,8 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_wide)
     ASSERT_EQ(cat.extract(2 * w - 1, w), one);
     ASSERT_EQ(eval({LsKind::ITE}, {t, lo64, bit64}), lo64);
     ASSERT_EQ(eval({LsKind::ITE}, {f, lo64, bit64}), bit64);
+    ASSERT_EQ(eval({LsKind::XOR}, {ones, lo64}), ~lo64);
+    ASSERT_EQ(eval({LsKind::XOR}, {lo64, lo64}), zero);
   }
 }
 
@@ -727,6 +733,17 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_urem)
   }
 }
 
+TEST_F(TestTheoryWhiteBvLsOps, rules_xor)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos <= 1; ++pos)
+    {
+      ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::XOR}, pos, {w, w}));
+    }
+  }
+}
+
 TEST_F(TestTheoryWhiteBvLsOps, is_essential)
 {
   // (op, widths of the children) to check, all positions each.
@@ -739,7 +756,8 @@ TEST_F(TestTheoryWhiteBvLsOps, is_essential)
                    LsKind::UDIV,
                    LsKind::UREM,
                    LsKind::SHL,
-                   LsKind::LSHR})
+                   LsKind::LSHR,
+                   LsKind::XOR})
   {
     for (uint32_t w = 1; w <= 3; ++w)
     {
@@ -980,6 +998,37 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_bitwise)
       checkRulesDomains({LsKind::ITE}, pos, {1, w, w}, sampled);
     }
   }
+}
+
+/**
+ * The rules modulo constant bits of XOR (prop-c+, FMCAD'20 Tables III and V:
+ * mcb(x, s ^ t) and true) against brute force: every domain with a fixed bit
+ * up to 3 bits, sampled at 4 bits.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_xor)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos < 2; ++pos)
+    {
+      checkRulesDomains({LsKind::XOR}, pos, {w, w}, w == 4);
+    }
+  }
+  // x ^ 0101 = 1111 needs x = 1010: x0x0 allows it, x1xx does not, and every
+  // value of x1xx is consistent (some s' gives t).
+  LsValue x0(4, 0b0000), s(4, 0b0101), t(4, 0b1111);
+  LsChildren ch{&x0, &s};
+  TernaryDomain ok = TernaryDomain::fromString("x0x0");
+  TernaryDomain loose = TernaryDomain::fromString("x0xx");
+  ASSERT_TRUE(isInvertible({LsKind::XOR}, 0, t, ch, ok));
+  ASSERT_EQ(inverseValue({LsKind::XOR}, 0, t, ch, ok, d_rng),
+            LsValue(4, 0b1010));
+  TernaryDomain bad = TernaryDomain::fromString("x1xx");
+  LsValue x1(4, 0b0100);
+  LsChildren ch1{&x1, &s};
+  ASSERT_FALSE(isInvertible({LsKind::XOR}, 0, t, ch1, bad));
+  ASSERT_TRUE(tryConsistentValue({LsKind::XOR}, 0, t, ch1, bad, d_rng));
+  ASSERT_TRUE(isInvertible({LsKind::XOR}, 0, t, ch, loose));
 }
 
 /**
@@ -1690,7 +1739,8 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_wide_values)
                      LsKind::UREM,
                      LsKind::SHL,
                      LsKind::LSHR,
-                     LsKind::CONCAT})
+                     LsKind::CONCAT,
+                     LsKind::XOR})
     {
       ops.push_back({{k}, {w, w}});
     }
@@ -1930,6 +1980,9 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain_known_bits)
   ASSERT_EQ(fd(LsKind::ULT, "00xx", "1xxx"), "1");
   ASSERT_EQ(fd(LsKind::ULT, "1xxx", "0xxx"), "0");
   ASSERT_EQ(fd(LsKind::ULT, "x0xx", "x1xx"), "x");
+  // XOR: a bit is fixed where both are, to their exclusive or.
+  ASSERT_EQ(fd(LsKind::XOR, "1x0x", "11xx"), "0xxx");
+  ASSERT_EQ(fd(LsKind::XOR, "10x1", "0110"), "11x1");
 }
 
 /**
@@ -1950,7 +2003,8 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain_wide)
                      LsKind::UDIV,
                      LsKind::UREM,
                      LsKind::SHL,
-                     LsKind::LSHR})
+                     LsKind::LSHR,
+                     LsKind::XOR})
     {
       for (uint32_t r = 0; r < 200; ++r)
       {
