@@ -362,5 +362,113 @@ TEST_F(TestTheoryWhiteBvLsSolverConstBits, statistics)
   ASSERT_GT(conflicts, 0);
 }
 
+/** The adapter with --bv-ls-native-ops and --bv-ls-const-bits (prop-c+). */
+class TestTheoryWhiteBvLsSolverNativeOps : public TestSmtNoFinishInit
+{
+ protected:
+  void SetUp() override
+  {
+    TestSmtNoFinishInit::SetUp();
+    d_slvEngine->setOption("bv-ls-const-bits", "true");
+    d_slvEngine->setOption("bv-ls-native-ops", "true");
+    d_slvEngine->finishInit();
+  }
+
+  /** A random constant of width w. */
+  Node mkBv(uint32_t w)
+  {
+    Integer v;
+    for (uint32_t i = 0; i < w; i += 32)
+    {
+      v = v.multiplyByPow2(32) + Integer(static_cast<uint32_t>(d_gen()));
+    }
+    return d_nodeManager->mkConst(BitVector(w, v.extractBitRange(w, 0)));
+  }
+
+  std::mt19937 d_gen{7};
+};
+
+/**
+ * bvxor, bvashr and sign_extend become one native node each: over fresh
+ * variables the translation adds the variables and that node only. On
+ * constants the nodes fold to the value of the rewritten term.
+ */
+TEST_F(TestTheoryWhiteBvLsSolverNativeOps, native_nodes)
+{
+  ASSERT_TRUE(d_slvEngine->getOptions().bv.bvLsNativeOps);
+  Env& env = d_slvEngine->getEnv();
+  BvLsSolver ls(env);
+  NodeManager* nm = d_nodeManager.get();
+  TypeNode bv8 = nm->mkBitVectorType(8);
+  Node x = nm->mkVar("x", bv8);
+  Node y = nm->mkVar("y", bv8);
+  uint32_t before = ls.d_engine.numNodes();
+  ASSERT_TRUE(ls.translate(nm->mkNode(Kind::BITVECTOR_XOR, x, y)));
+  ASSERT_EQ(ls.d_engine.numNodes(), before + 3);  // x, y, x ^ y
+  ASSERT_TRUE(ls.translate(nm->mkNode(Kind::BITVECTOR_ASHR, x, y)));
+  ASSERT_EQ(ls.d_engine.numNodes(), before + 4);
+  ASSERT_TRUE(ls.translate(utils::mkSignExtend(x, 4)));
+  ASSERT_EQ(ls.d_engine.numNodes(), before + 5);
+
+  for (uint32_t w : {1u, 2u, 3u, 8u, 64u, 65u})
+  {
+    for (uint32_t i = 0; i < 30; ++i)
+    {
+      Node a = mkBv(w);
+      Node b = mkBv(w);
+      // Small amounts make the arithmetic shift interesting.
+      Node k = nm->mkConst(BitVector(w, Integer(d_gen() % (w + 2)))
+                               .unsignedRemTotal(BitVector::mkOnes(w)));
+      for (const Node& t : {nm->mkNode(Kind::BITVECTOR_XOR, a, b),
+                            nm->mkNode(Kind::BITVECTOR_XNOR, a, b),
+                            nm->mkNode(Kind::BITVECTOR_ASHR, a, b),
+                            nm->mkNode(Kind::BITVECTOR_ASHR, a, k),
+                            utils::mkSignExtend(a, 5)})
+      {
+        std::optional<uint32_t> id = ls.translate(t);
+        ASSERT_TRUE(id.has_value()) << t;
+        ASSERT_TRUE(ls.d_engine.isConst(*id)) << t;
+        Node expected = env.getRewriter()->rewrite(t);
+        ASSERT_EQ(ls.d_engine.value(*id).toBitVector(),
+                  expected.getConst<BitVector>())
+            << t;
+      }
+    }
+  }
+}
+
+/**
+ * End to end with the native operators: x ^ y = a5, x >>a 2 = f9 (x is
+ * 111001xx), 80 >>a s = f0 (s = 3), sext(a, 4) = fa (a = 1010) and y < 60.
+ * The search finds a model and it satisfies the facts.
+ */
+TEST_F(TestTheoryWhiteBvLsSolverNativeOps, check_and_model)
+{
+  BvLsSolver ls(d_slvEngine->getEnv());
+  NodeManager* nm = d_nodeManager.get();
+  TypeNode bv8 = nm->mkBitVectorType(8);
+  Node x = nm->mkVar("x", bv8);
+  Node y = nm->mkVar("y", bv8);
+  Node s = nm->mkVar("s", bv8);
+  Node a = nm->mkVar("a", nm->mkBitVectorType(4));
+  auto c8 = [nm](uint32_t v) { return nm->mkConst(BitVector(8, v)); };
+  std::vector<Node> facts = {
+      nm->mkNode(Kind::EQUAL, nm->mkNode(Kind::BITVECTOR_XOR, x, y), c8(0xa5)),
+      nm->mkNode(
+          Kind::EQUAL, nm->mkNode(Kind::BITVECTOR_ASHR, x, c8(2)), c8(0xf9)),
+      nm->mkNode(
+          Kind::EQUAL, nm->mkNode(Kind::BITVECTOR_ASHR, c8(0x80), s), c8(0xf0)),
+      nm->mkNode(Kind::EQUAL, utils::mkSignExtend(a, 4), c8(0xfa)),
+      nm->mkNode(Kind::BITVECTOR_ULT, y, c8(0x60))};
+  ASSERT_EQ(ls.check(facts), prop::SAT_VALUE_TRUE);
+  BitVector xv = ls.getValue(x).getConst<BitVector>();
+  BitVector yv = ls.getValue(y).getConst<BitVector>();
+  ASSERT_EQ(xv ^ yv, BitVector(8, 0xa5u));
+  ASSERT_EQ(xv.arithRightShift(BitVector(8, 2u)), BitVector(8, 0xf9u));
+  ASSERT_EQ(ls.getValue(s).getConst<BitVector>(), BitVector(8, 3u));
+  ASSERT_EQ(ls.getValue(a).getConst<BitVector>(), BitVector(4, 0xau));
+  ASSERT_TRUE(yv < BitVector(8, 0x60u));
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
