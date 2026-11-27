@@ -43,6 +43,7 @@ const char* toString(LsKind k)
     case LsKind::ITE: return "ITE";
     case LsKind::XOR: return "XOR";
     case LsKind::SEXT: return "SEXT";
+    case LsKind::ASHR: return "ASHR";
   }
   Unreachable();
 }
@@ -71,7 +72,8 @@ uint32_t arity(LsKind k)
     case LsKind::SHL:
     case LsKind::LSHR:
     case LsKind::CONCAT:
-    case LsKind::XOR: return 2;
+    case LsKind::XOR:
+    case LsKind::ASHR: return 2;
     case LsKind::ITE: return 3;
   }
   Unreachable();
@@ -81,6 +83,15 @@ namespace {
 
 /** Return the width-1 value of b. */
 LsValue mkBool(bool b) { return LsValue(1, b ? 1 : 0); }
+
+/**
+ * Return x shifted right arithmetically by k bits: the bits shifted in are
+ * copies of the most significant bit, all of them if k >= w.
+ */
+LsValue ashrBy(const LsValue& x, uint32_t k)
+{
+  return msb(x) ? ~(~x).logicalRightShift(k) : x.logicalRightShift(k);
+}
 
 /** Return x sign-extended by n >= 1 bits. */
 LsValue signExtend(const LsValue& x, uint32_t n)
@@ -178,6 +189,8 @@ LsValue evaluate(const OpInfo& op, const LsChildren& ch)
       return ch[0]->isBitSet(0) ? *ch[1] : *ch[2];
     case LsKind::XOR: return *ch[0] ^ *ch[1];
     case LsKind::SEXT: Assert(op.hi >= 1); return signExtend(*ch[0], op.hi);
+    case LsKind::ASHR:
+      return ashrBy(*ch[0], shiftAmount(*ch[1], ch[0]->getSize()));
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -307,6 +320,67 @@ LsValue consShift(uint32_t posX, const LsValue& t, bool left, LsRng& rng)
     return randomizeLostBits(shiftBy(t, k, !left), k, left, rng);
   }
   return rng.randomInRange(LsValue::mkZero(w), LsValue(w, zt));
+}
+
+/*
+ * ASHR (FMCAD'20 Tables III and V). At position 0, x >>a s = t needs the top
+ * k + 1 bits of t to be equal for the amount k = s < w (they are copies of
+ * the sign of x), and t in {0, ones} for k >= w. At position 1, s >>a x = t is
+ * s >> x = t if s[msb] = 0 and ~s >> x = ~t otherwise, so its rules are those
+ * of LSHR on the values that ashrAsLshr returns.
+ */
+
+/** The number of top bits of t equal to its most significant bit. */
+uint32_t signRun(const LsValue& t) { return msb(t) ? clz(~t) : clz(t); }
+
+/** The base IC for x >>a s = t, x at position 0. */
+bool icAshrValue(const LsValue& s, const LsValue& t)
+{
+  uint32_t w = t.getSize();
+  uint32_t k = shiftAmount(s, w);
+  return k >= w ? isZero(t) || isOnes(t) : signRun(t) > k;
+}
+
+/**
+ * A value v with v >>a k = t, which icAshrValue requires to exist: t shifted
+ * back with the k bits shifted out drawn, or for k >= w (t is 0 or ones) a
+ * value with the sign of t and the other bits drawn.
+ */
+LsValue invAshrValue(uint32_t k, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  if (k >= w)
+  {
+    return setSlice(rng.randomValue(w), w - 1, w - 1, mkBool(msb(t)));
+  }
+  return randomizeLostBits(t.leftShift(k), k, false, rng);
+}
+
+/** s and t, complemented if s[msb] = 1: s >>a x = t iff s' >> x = t'. */
+std::pair<LsValue, LsValue> ashrAsLshr(const LsValue& s, const LsValue& t)
+{
+  return msb(s) ? std::make_pair(~s, ~t) : std::make_pair(s, t);
+}
+
+/**
+ * Consistent value for ASHR. Position 0: for t in {0, ones}, any value with
+ * the sign of t (with an amount >= w); otherwise an amount k < signRun(t),
+ * drawn uniformly, and a value as the inverse value for it. Position 1: any
+ * amount for t in {0, ones} (s' = t), otherwise one below signRun(t).
+ */
+LsValue consAshr(uint32_t posX, const LsValue& t, LsRng& rng)
+{
+  uint32_t w = t.getSize();
+  bool constant = isZero(t) || isOnes(t);
+  if (posX == 0)
+  {
+    return invAshrValue(constant ? w : rng.pickIndex(signRun(t)), t, rng);
+  }
+  if (constant)
+  {
+    return rng.randomValue(w);
+  }
+  return rng.randomInRange(LsValue::mkZero(w), LsValue(w, signRun(t) - 1));
 }
 
 /** Inverse value for x * s = t (MUL is commutative). */
@@ -623,6 +697,16 @@ LsValue computeInverse(const OpInfo& op,
     case LsKind::XOR: return t ^ *ch[1 - posX];
     // sext(x) = t: the only solution is the low w bits of t.
     case LsKind::SEXT: return t.extract(w - 1, 0);
+    case LsKind::ASHR:
+    {
+      if (posX == 0)
+      {
+        return invAshrValue(shiftAmount(*ch[1], w), t, rng);
+      }
+      auto [s, tl] = ashrAsLshr(*ch[0], t);
+      LsChildren chl{&s, ch[1]};
+      return invShift(1, tl, chl, false, rng);
+    }
     case LsKind::CONST:
     case LsKind::VAR: break;
   }
@@ -647,6 +731,15 @@ bool isInvertible(const OpInfo& op,
     case LsKind::XOR: return true;
     case LsKind::AND: return (t & *ch[1 - posX]) == t;
     case LsKind::SEXT: return isSignExtension(t, ch[0]->getSize());
+    case LsKind::ASHR:
+    {
+      if (posX == 0)
+      {
+        return icAshrValue(*ch[1], t);
+      }
+      auto [s, tl] = ashrAsLshr(*ch[0], t);
+      return icShiftAmount(s, tl, false);
+    }
     case LsKind::CONCAT:
     {
       // The other child must equal the rest of t.
@@ -746,6 +839,7 @@ LsValue consistentValue(const OpInfo& op,
       // Unary: the only consistent value is the inverse value.
       Assert(isInvertible(op, posX, t, ch));
       return t.extract(w - 1, 0);
+    case LsKind::ASHR: return consAshr(posX, t, rng);
     case LsKind::ITE:
       // For a branch, t is consistent (with the condition selecting it).
       return posX == 0 ? rng.randomValue(1) : t;
@@ -792,6 +886,30 @@ const LsValue& boolValue(bool b)
 TernaryDomain shiftDomain(const TernaryDomain& x, uint32_t k, bool left)
 {
   return left ? shlD(x, k) : lshrD(x, k);
+}
+
+/**
+ * The domain of v >>a k for v matching x: that of v >> k (of ~(~v >> k) if
+ * the sign is fixed to 1), and if the sign is free, free copies of it on top.
+ * This is exact.
+ */
+TernaryDomain ashrDomain(const TernaryDomain& x, uint32_t k)
+{
+  uint32_t w = x.getSize();
+  uint32_t m = w - 1;
+  if (x.isFixedBit(m))
+  {
+    return x.isFixedTrue(m) ? notD(lshrD(notD(x), k)) : lshrD(x, k);
+  }
+  if (k == 0)
+  {
+    return x;
+  }
+  if (k >= w)
+  {
+    return TernaryDomain::full(w);
+  }
+  return concatD(TernaryDomain::full(k), extractD(x, m, k));
 }
 
 /**
@@ -1131,6 +1249,19 @@ bool icFixedBits(const OpInfo& op,
     // sext(x) = t: Table III, the base condition (the top n + 1 bits of t are
     // all 0 or all 1) and mcb(x, the low w bits of t).
     case LsKind::SEXT: return x.matches(t.extract(x.getSize() - 1, 0));
+    case LsKind::ASHR:
+    {
+      if (posX == 0)
+      {
+        // x >>a s = t: Table III, the base condition and mcb(x >>a s, t), with
+        // the exact domain of x >>a s.
+        return ashrDomain(x, shiftAmount(*ch[1], t.getSize())).matches(t);
+      }
+      // s >>a x = t: Table III, the condition of s' >> x = t'.
+      auto [s, tl] = ashrAsLshr(*ch[0], t);
+      LsChildren chl{&s, ch[1]};
+      return icFixedBits({LsKind::LSHR}, 1, tl, chl, x);
+    }
     case LsKind::ITE:
       // Not in the paper (plan D16). For the condition, a branch equal to t
       // whose selecting value matches x; for a branch, it must be enabled
@@ -1306,6 +1437,18 @@ LsValue inverseFixedBits(const OpInfo& op,
     case LsKind::ADD: return t - *ch[1 - posX];
     case LsKind::XOR: return t ^ *ch[1 - posX];
     case LsKind::SEXT: return t.extract(w - 1, 0);
+    case LsKind::ASHR:
+    {
+      if (posX == 0)
+      {
+        // The bits of x that survive the shift come from t and match x; the
+        // others are drawn and then forced to the fixed bits of x.
+        return x.apply(invAshrValue(shiftAmount(*ch[1], w), t, rng));
+      }
+      auto [s, tl] = ashrAsLshr(*ch[0], t);
+      LsChildren chl{&s, ch[1]};
+      return inverseFixedBits({LsKind::LSHR}, 1, tl, chl, x, rng);
+    }
     case LsKind::CONCAT: return concatPartOf(posX, t, ch);
     case LsKind::EXTRACT:
       // The base rule (the bits outside [u:l] kept, drawn, or set to all 0s
@@ -1578,6 +1721,59 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
       LsValue v = t.extract(w - 1, 0);
       return isSignExtension(t, w) && x.matches(v) ? std::optional<LsValue>(v)
                                                    : std::nullopt;
+    }
+    case LsKind::ASHR:
+    {
+      bool constant = isZero(t) || isOnes(t);
+      if (posX == 1)
+      {
+        // s' >>a x = t: Table V, t in {0, ones} (every amount), or an amount
+        // below signRun(t) that matches x.
+        if (constant)
+        {
+          return pick(x, rng);
+        }
+        LsValue maxAmount(w, signRun(t) - 1);
+        if (!hasMatchingIn(x, LsValue::mkZero(w), maxAmount))
+        {
+          return std::nullopt;
+        }
+        return pick(x, LsValue::mkZero(w), maxAmount, rng);
+      }
+      uint32_t m = w - 1;
+      if (constant)
+      {
+        // x >>a s' = t: Table V, for t in {0, ones} some value matching x
+        // with the sign of t; every such value is consistent.
+        if (x.isFixedBit(m) && x.isFixedTrue(m) != msb(t))
+        {
+          return std::nullopt;
+        }
+        return x.apply(invAshrValue(w, t, rng));
+      }
+      // Otherwise Table V: some amount k < signRun(t) with mcb(x >>a k, t).
+      // Draw such an amount uniformly, then a value as the inverse value for
+      // it, so that every consistent value has a non-zero probability.
+      uint32_t run = signRun(t);
+      uint32_t n = 0;
+      for (uint32_t k = 0; k < run; ++k)
+      {
+        n += ashrDomain(x, k).matches(t);
+      }
+      if (n == 0)
+      {
+        return std::nullopt;
+      }
+      uint32_t j = rng.pickIndex(n);
+      uint32_t k = 0;
+      for (;; ++k)
+      {
+        if (ashrDomain(x, k).matches(t) && j-- == 0)
+        {
+          break;
+        }
+      }
+      return x.apply(invAshrValue(k, t, rng));
     }
     case LsKind::ITE:
       // Not in the paper (plan D16). Every condition is consistent. For a
@@ -1950,13 +2146,25 @@ TernaryDomain uremD(const TernaryDomain& x, const TernaryDomain& y)
   return intervalD(LsValue::mkZero(w), ub);
 }
 
+/** The domain of v shifted by the constant k, for kind SHL, LSHR or ASHR. */
+TernaryDomain shiftByD(const TernaryDomain& x, LsKind kind, uint32_t k)
+{
+  switch (kind)
+  {
+    case LsKind::SHL: return shlD(x, k);
+    case LsKind::LSHR: return lshrD(x, k);
+    default: Assert(kind == LsKind::ASHR); return ashrDomain(x, k);
+  }
+}
+
 /**
- * The domain of v << u (left) or v >> u: the join of the exact domains for
- * each shift amount k <= w that u can take (amounts of w or more give 0).
+ * The domain of v << u, v >> u or v >>a u (kind SHL, LSHR or ASHR): the join
+ * of the exact domains for each shift amount k <= w that u can take (all
+ * amounts of w or more shift the same).
  */
 TernaryDomain shiftD(const TernaryDomain& x,
                      const TernaryDomain& amount,
-                     bool left)
+                     LsKind kind)
 {
   uint32_t w = x.getSize();
   std::optional<TernaryDomain> res;
@@ -1969,7 +2177,7 @@ TernaryDomain shiftD(const TernaryDomain& x,
     {
       continue;
     }
-    TernaryDomain d = left ? shlD(x, k) : lshrD(x, k);
+    TernaryDomain d = shiftByD(x, kind, k);
     res = res ? join(*res, d) : d;
     if (!res->hasFixedBits())
     {
@@ -2010,15 +2218,14 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
     case LsKind::SEXT: return sextD(x, op.hi);
     case LsKind::SHL:
     case LsKind::LSHR:
+    case LsKind::ASHR:
     {
       const TernaryDomain& amount = *doms[1];
-      bool left = op.kind == LsKind::SHL;
       if (amount.isFixed())
       {
-        uint32_t k = shiftAmount(amount.lo(), x.getSize());
-        return left ? shlD(x, k) : lshrD(x, k);
+        return shiftByD(x, op.kind, shiftAmount(amount.lo(), x.getSize()));
       }
-      return shiftD(x, amount, left);
+      return shiftD(x, amount, op.kind);
     }
     case LsKind::ITE:
       // The selected branch if the condition is fixed, else either branch.

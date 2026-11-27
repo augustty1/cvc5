@@ -67,6 +67,11 @@ class TestTheoryWhiteBvLsOps : public TestInternal
       case LsKind::SHL: return b >= w ? 0 : (a << b) & mask;
       case LsKind::LSHR: return b >= w ? 0 : a >> b;
       case LsKind::XOR: return a ^ b;
+      case LsKind::ASHR:
+      {
+        uint32_t sign = (a >> (w - 1)) != 0 ? mask : 0;
+        return b >= w ? sign : (a >> b) | ((sign << (w - b)) & mask);
+      }
       default: break;
     }
     Unreachable();
@@ -299,7 +304,8 @@ class TestTheoryWhiteBvLsOps : public TestInternal
                      LsKind::SHL,
                      LsKind::LSHR,
                      LsKind::CONCAT,
-                     LsKind::XOR})
+                     LsKind::XOR,
+                     LsKind::ASHR})
     {
       res.push_back({{k}, {w, w}});
     }
@@ -501,6 +507,7 @@ TEST_F(TestTheoryWhiteBvLsOps, arity_toString)
   ASSERT_EQ(arity(LsKind::ITE), 3u);
   ASSERT_EQ(arity(LsKind::XOR), 2u);
   ASSERT_EQ(arity(LsKind::SEXT), 1u);
+  ASSERT_EQ(arity(LsKind::ASHR), 2u);
   std::stringstream ss;
   ss << LsKind::LSHR;
   ASSERT_EQ(ss.str(), "LSHR");
@@ -518,7 +525,8 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_binary_exhaustive)
                    LsKind::UREM,
                    LsKind::SHL,
                    LsKind::LSHR,
-                   LsKind::XOR})
+                   LsKind::XOR,
+                   LsKind::ASHR})
   {
     bool isPred = k == LsKind::EQ || k == LsKind::ULT;
     for (uint32_t w = 1; w <= 4; ++w)
@@ -636,6 +644,10 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_wide)
               LsValue::mkOnes(3).concat(msbOnly));
     ASSERT_EQ(eval({LsKind::SEXT, 70}, {lo64}),
               LsValue::mkZero(70).concat(lo64));
+    ASSERT_EQ(eval({LsKind::ASHR}, {msbOnly, LsValue(w, w - 1)}), ones);
+    ASSERT_EQ(eval({LsKind::ASHR}, {msbOnly, ones}), ones);
+    ASSERT_EQ(eval({LsKind::ASHR}, {lo64, ones}), zero);
+    ASSERT_EQ(eval({LsKind::ASHR}, {lo64, LsValue(w, 63u)}), one);
   }
 }
 
@@ -782,6 +794,17 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_sext)
   }
 }
 
+TEST_F(TestTheoryWhiteBvLsOps, rules_ashr)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos <= 1; ++pos)
+    {
+      ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::ASHR}, pos, {w, w}));
+    }
+  }
+}
+
 TEST_F(TestTheoryWhiteBvLsOps, is_essential)
 {
   // (op, widths of the children) to check, all positions each.
@@ -795,7 +818,8 @@ TEST_F(TestTheoryWhiteBvLsOps, is_essential)
                    LsKind::UREM,
                    LsKind::SHL,
                    LsKind::LSHR,
-                   LsKind::XOR})
+                   LsKind::XOR,
+                   LsKind::ASHR})
   {
     for (uint32_t w = 1; w <= 3; ++w)
     {
@@ -1108,6 +1132,52 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_sext)
   TernaryDomain full = TernaryDomain::full(2);
   ASSERT_FALSE(isInvertible(op, 0, LsValue(4, 0b0110), ch, full));
   ASSERT_FALSE(tryConsistentValue(op, 0, LsValue(4, 0b0110), ch, full, d_rng));
+}
+
+/**
+ * The rules modulo constant bits of ASHR (prop-c+, FMCAD'20 Tables III and V)
+ * against brute force: every domain with a fixed bit up to 3 bits, sampled at
+ * 4 bits.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_ashr)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos < 2; ++pos)
+    {
+      checkRulesDomains({LsKind::ASHR}, pos, {w, w}, w == 4);
+    }
+  }
+  OpInfo op{LsKind::ASHR};
+  // x >>a 2 = 1110 needs x = 10xx; with x in 1x0x the solutions are 1000 and
+  // 1001. 0110 is not the result of a shift by 2 (its top 3 bits differ).
+  LsValue x0(4, 0b1000), two(4, 2u);
+  LsChildren ch{&x0, &two};
+  TernaryDomain x = TernaryDomain::fromString("1x0x");
+  ASSERT_TRUE(isInvertible(op, 0, LsValue(4, 0b1110), ch, x));
+  for (uint32_t i = 0; i < 16; ++i)
+  {
+    LsValue v = inverseValue(op, 0, LsValue(4, 0b1110), ch, x, d_rng);
+    ASSERT_TRUE(v == LsValue(4, 0b1000) || v == LsValue(4, 0b1001)) << v;
+  }
+  ASSERT_FALSE(isInvertible(op, 0, LsValue(4, 0b0110), ch, x));
+  // 1110 needs the sign 1 and the bits 10 below it: x in 0xxx has none, and no
+  // amount helps (conflict); 1111 with x in 0xxx needs a negative x too.
+  TernaryDomain pos = TernaryDomain::fromString("0xxx");
+  LsValue x1(4, 0b0000);
+  LsChildren ch1{&x1, &two};
+  ASSERT_FALSE(tryConsistentValue(op, 0, LsValue(4, 0b1110), ch1, pos, d_rng));
+  ASSERT_FALSE(tryConsistentValue(op, 0, LsValue(4, 0b1111), ch1, pos, d_rng));
+  // s >>a x = t with s negative: 1100 >>a x = 1111 needs x >= 2; the amount
+  // domain xx1x allows 2, 3, 6, 7, 10, 11, 14, 15.
+  LsValue s(4, 0b1100), a0(4, 0b0010);
+  LsChildren ch2{&s, &a0};
+  TernaryDomain amount = TernaryDomain::fromString("xx1x");
+  ASSERT_TRUE(isInvertible(op, 1, LsValue(4, 0b1111), ch2, amount));
+  LsValue k = inverseValue(op, 1, LsValue(4, 0b1111), ch2, amount, d_rng);
+  ASSERT_TRUE(amount.matches(k) && LsValue(4, 1u).unsignedLessThan(k)) << k;
+  // 1100 >>a x = 1110 needs x = 1, which xx1x does not allow.
+  ASSERT_FALSE(isInvertible(op, 1, LsValue(4, 0b1110), ch2, amount));
 }
 
 /**
@@ -1819,7 +1889,8 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_wide_values)
                      LsKind::SHL,
                      LsKind::LSHR,
                      LsKind::CONCAT,
-                     LsKind::XOR})
+                     LsKind::XOR,
+                     LsKind::ASHR})
     {
       ops.push_back({{k}, {w, w}});
     }
@@ -2072,6 +2143,10 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain_known_bits)
   ASSERT_EQ(fd1({LsKind::SEXT, 2}, "1x0"), "111x0");
   ASSERT_EQ(fd1({LsKind::SEXT, 2}, "0xx"), "000xx");
   ASSERT_EQ(fd1({LsKind::SEXT, 2}, "xx0"), "xxxx0");
+  // ASHR: the bits shifted in copy the sign, fixed iff it is.
+  ASSERT_EQ(fd(LsKind::ASHR, "10xx", "001x"), "111x");
+  ASSERT_EQ(fd(LsKind::ASHR, "0xx1", "0001"), "00xx");
+  ASSERT_EQ(fd(LsKind::ASHR, "x0xx", "0010"), "xxx0");
 }
 
 /**
@@ -2093,7 +2168,8 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain_wide)
                      LsKind::UREM,
                      LsKind::SHL,
                      LsKind::LSHR,
-                     LsKind::XOR})
+                     LsKind::XOR,
+                     LsKind::ASHR})
     {
       for (uint32_t r = 0; r < 200; ++r)
       {
