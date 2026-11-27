@@ -61,10 +61,11 @@ enum class LsKind
   ITE,      // c ? x : y, c of width 1
   XOR,      // x ^ y
   SEXT,     // x sign-extended by n bits (n = OpInfo::hi)
+  ASHR,     // x >> y (arithmetic)
 };
 
 /** The number of kinds. */
-constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::SEXT) + 1;
+constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::ASHR) + 1;
 
 const char* toString(LsKind k);
 std::ostream& operator<<(std::ostream& os, LsKind k);
@@ -271,9 +272,10 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
  * Return a domain that the value of op matches whenever the values of its
  * children match doms, computed at the word level (plan Sec. 5.2). It is
  * exact (a bit is fixed iff it is the same for all those values) for NOT,
- * AND, XOR, ADD, CONCAT, EXTRACT, SEXT, ITE, SHL, LSHR, EQ and ULT, and when
- * all children are fixed. For MUL, UDIV and UREM it fixes the bits that "known
- * bits" rules and the bounds of the result determine, which may be fewer.
+ * AND, XOR, ADD, CONCAT, EXTRACT, SEXT, ITE, SHL, LSHR, ASHR, EQ and ULT, and
+ * when all children are fixed. For MUL, UDIV and UREM it fixes the bits that
+ * "known bits" rules and the bounds of the result determine, which may be
+ * fewer.
  */
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 
