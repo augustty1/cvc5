@@ -187,6 +187,14 @@ class TestTheoryWhiteBvLsOps : public TestInternal
           }
         }
 
+        if (consistent.empty())
+        {
+          // Only SEXT has targets that no value produces (t not a sign
+          // extension); consistentValue requires them to be invertible.
+          ASSERT_EQ(op.kind, LsKind::SEXT) << ctx.str();
+          ASSERT_FALSE(expectedIc) << ctx.str();
+          continue;
+        }
         std::set<uint32_t> seen;
         uint32_t samples = coverage ? kCoverageSamples : kSamples;
         for (uint32_t i = 0; i < samples; ++i)
@@ -308,6 +316,8 @@ class TestTheoryWhiteBvLsOps : public TestInternal
       }
     }
     res.push_back({{LsKind::ITE}, {1, w, w}});
+    res.push_back({{LsKind::SEXT, 1}, {w}});
+    res.push_back({{LsKind::SEXT, 2}, {w}});
     return res;
   }
 
@@ -465,6 +475,10 @@ class TestTheoryWhiteBvLsOps : public TestInternal
     {
       ss << "[" << op.hi << ":" << op.lo << "]";
     }
+    else if (op.kind == LsKind::SEXT)
+    {
+      ss << "[" << op.hi << "]";
+    }
     ss << " widths";
     for (uint32_t w : widths)
     {
@@ -486,6 +500,7 @@ TEST_F(TestTheoryWhiteBvLsOps, arity_toString)
   ASSERT_EQ(arity(LsKind::ULT), 2u);
   ASSERT_EQ(arity(LsKind::ITE), 3u);
   ASSERT_EQ(arity(LsKind::XOR), 2u);
+  ASSERT_EQ(arity(LsKind::SEXT), 1u);
   std::stringstream ss;
   ss << LsKind::LSHR;
   ASSERT_EQ(ss.str(), "LSHR");
@@ -530,6 +545,14 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_other_exhaustive)
     for (uint32_t a = 0; a <= mask; ++a)
     {
       ASSERT_EQ(eval({LsKind::NOT}, {LsValue(w, a)}), LsValue(w, ~a & mask));
+
+      for (uint32_t ext = 1; ext <= 3; ++ext)
+      {
+        uint32_t top = (a >> (w - 1)) != 0 ? ((1u << ext) - 1) << w : 0;
+        ASSERT_EQ(eval({LsKind::SEXT, ext}, {LsValue(w, a)}),
+                  LsValue(w + ext, top | a))
+            << "w=" << w << " a=" << a << " ext=" << ext;
+      }
 
       for (uint32_t hi = 0; hi < w; ++hi)
       {
@@ -609,6 +632,10 @@ TEST_F(TestTheoryWhiteBvLsOps, evaluate_wide)
     ASSERT_EQ(eval({LsKind::ITE}, {f, lo64, bit64}), bit64);
     ASSERT_EQ(eval({LsKind::XOR}, {ones, lo64}), ~lo64);
     ASSERT_EQ(eval({LsKind::XOR}, {lo64, lo64}), zero);
+    ASSERT_EQ(eval({LsKind::SEXT, 3}, {msbOnly}),
+              LsValue::mkOnes(3).concat(msbOnly));
+    ASSERT_EQ(eval({LsKind::SEXT, 70}, {lo64}),
+              LsValue::mkZero(70).concat(lo64));
   }
 }
 
@@ -740,6 +767,17 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_xor)
     for (uint32_t pos = 0; pos <= 1; ++pos)
     {
       ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::XOR}, pos, {w, w}));
+    }
+  }
+}
+
+TEST_F(TestTheoryWhiteBvLsOps, rules_sext)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t ext = 1; ext <= 3; ++ext)
+    {
+      ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::SEXT, ext}, 0, {w}));
     }
   }
 }
@@ -947,11 +985,19 @@ TEST_F(TestTheoryWhiteBvLsOps, full_domain_is_base)
                         inverseValue(op, pos, t, ch, r2))
                   << ctx.str();
             }
-            // Without fixed bits a consistent value always exists.
+            // Without fixed bits a consistent value exists, except for SEXT
+            // when t is not a sign extension.
             std::optional<LsValue> c =
                 tryConsistentValue(op, pos, t, ch, x, r1);
-            ASSERT_TRUE(c.has_value()) << ctx.str();
-            ASSERT_EQ(*c, consistentValue(op, pos, t, ch, r2)) << ctx.str();
+            if (op.kind == LsKind::SEXT && !ic)
+            {
+              ASSERT_FALSE(c.has_value()) << ctx.str();
+            }
+            else
+            {
+              ASSERT_TRUE(c.has_value()) << ctx.str();
+              ASSERT_EQ(*c, consistentValue(op, pos, t, ch, r2)) << ctx.str();
+            }
             ASSERT_EQ(r1.randomValue(64), r2.randomValue(64)) << ctx.str();
           }
         }
@@ -1029,6 +1075,39 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_xor)
   ASSERT_FALSE(isInvertible({LsKind::XOR}, 0, t, ch1, bad));
   ASSERT_TRUE(tryConsistentValue({LsKind::XOR}, 0, t, ch1, bad, d_rng));
   ASSERT_TRUE(isInvertible({LsKind::XOR}, 0, t, ch, loose));
+}
+
+/**
+ * The rules modulo constant bits of SEXT (prop-c+, FMCAD'20 Tables III and V:
+ * the top n + 1 bits of t equal and mcb(x, the low w bits of t), the same for
+ * the consistency condition) against brute force: every domain with a fixed
+ * bit up to 3 bits, sampled at 4 bits.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, domain_rules_sext)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t ext = 1; ext <= 3; ++ext)
+    {
+      checkRulesDomains({LsKind::SEXT, ext}, 0, {w}, w == 4);
+    }
+  }
+  // sext by 2 of x in x1: 1111 needs x = 11 and 0001 needs x = 01, both
+  // matching; 0010 needs 10, which does not match (a conflict); 0110 is not
+  // a sign extension, even without fixed bits.
+  OpInfo op{LsKind::SEXT, 2};
+  LsValue x0(2, 0b01);
+  LsChildren ch{&x0};
+  TernaryDomain x = TernaryDomain::fromString("x1");
+  ASSERT_TRUE(isInvertible(op, 0, LsValue(4, 0b1111), ch, x));
+  ASSERT_EQ(inverseValue(op, 0, LsValue(4, 0b1111), ch, x, d_rng),
+            LsValue(2, 0b11));
+  ASSERT_TRUE(isInvertible(op, 0, LsValue(4, 0b0001), ch, x));
+  ASSERT_FALSE(isInvertible(op, 0, LsValue(4, 0b0010), ch, x));
+  ASSERT_FALSE(tryConsistentValue(op, 0, LsValue(4, 0b0010), ch, x, d_rng));
+  TernaryDomain full = TernaryDomain::full(2);
+  ASSERT_FALSE(isInvertible(op, 0, LsValue(4, 0b0110), ch, full));
+  ASSERT_FALSE(tryConsistentValue(op, 0, LsValue(4, 0b0110), ch, full, d_rng));
 }
 
 /**
@@ -1749,6 +1828,8 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_wide_values)
     ops.push_back({{LsKind::EXTRACT, w - 2, 60}, {w}});
     ops.push_back({{LsKind::EXTRACT, 70 % w, 3}, {w}});
     ops.push_back({{LsKind::ITE}, {1, w, w}});
+    ops.push_back({{LsKind::SEXT, 3}, {w}});
+    ops.push_back({{LsKind::SEXT, 64}, {w}});
     for (const auto& [op, widths] : ops)
     {
       uint32_t n = widths.size();
@@ -1983,6 +2064,14 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain_known_bits)
   // XOR: a bit is fixed where both are, to their exclusive or.
   ASSERT_EQ(fd(LsKind::XOR, "1x0x", "11xx"), "0xxx");
   ASSERT_EQ(fd(LsKind::XOR, "10x1", "0110"), "11x1");
+  // SEXT: the copies of the most significant bit are fixed iff it is.
+  auto fd1 = [](OpInfo op, const char* a) {
+    TernaryDomain x = TernaryDomain::fromString(a);
+    return forwardDomain(op, {&x}).toString();
+  };
+  ASSERT_EQ(fd1({LsKind::SEXT, 2}, "1x0"), "111x0");
+  ASSERT_EQ(fd1({LsKind::SEXT, 2}, "0xx"), "000xx");
+  ASSERT_EQ(fd1({LsKind::SEXT, 2}, "xx0"), "xxxx0");
 }
 
 /**

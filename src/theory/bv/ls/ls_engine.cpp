@@ -47,7 +47,11 @@ uint32_t LsEngine::mkOp(LsKind k,
   Assert(arity(k) > 0 && children.size() == arity(k));
   if (k != LsKind::EXTRACT)
   {
-    hi = lo = 0;
+    lo = 0;
+    if (k != LsKind::SEXT)
+    {
+      hi = 0;
+    }
   }
   // An ITE with a constant condition is its selected branch.
   if (k == LsKind::ITE && d_nodes[children[0]].isConst)
