@@ -63,6 +63,16 @@ struct LsStats
   uint64_t conflicts = 0;
   /** The conflicts by the kind of the node where they happened. */
   std::array<uint64_t, kNumLsKinds> conflictsByKind{};
+  /**
+   * prop-cb+: propagation steps that tried an inverse value and found bounds
+   * for it; of those, the ones whose inverse value was drawn within the
+   * bounds, and the ones whose bounds left no inverse value and fell back to
+   * a consistent value. A run without any step with bounds draws the same
+   * random numbers as without ineqBounds.
+   */
+  uint64_t propsWithBounds = 0;
+  uint64_t propsBounded = 0;
+  uint64_t boundsFallback = 0;
 };
 
 /**

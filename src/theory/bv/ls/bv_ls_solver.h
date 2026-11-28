@@ -135,6 +135,10 @@ class BvLsSolver : protected EnvObj
   IntStat d_numProps;
   IntStat d_numPropsInv;
   IntStat d_numPropsCons;
+  /** prop-cb+: steps with bounds, drawn within them, and fallbacks. */
+  IntStat d_numPropsWithBounds;
+  IntStat d_numPropsBounded;
+  IntStat d_numBoundsFallback;
   IntStat d_numUpdates;
   IntStat d_numConflicts;
   IntStat d_numRoots;

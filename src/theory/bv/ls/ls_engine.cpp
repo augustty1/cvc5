@@ -374,8 +374,47 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
       // condition modulo constant bits holds, else a consistent value, else
       // a conflict.
       const TernaryDomain& x = d_nodes[n.children[i]].dom;
-      if ((onlyOne || d_rng.pickWithProb(d_config.probInverse))
-          && isInvertible(n.op, i, t, ch, x))
+      bool tryInverse = onlyOne || d_rng.pickWithProb(d_config.probInverse);
+      // prop-cb+ (FMCAD'20 Sec. V-A): an inverse value within the bounds of
+      // the satisfied inequality roots on x. In a forced step, where the
+      // consistent branch is never taken, the bounds apply with the
+      // probability of the inverse branch, so that every inverse value keeps
+      // a non-zero probability (D38).
+      std::optional<LsBounds> bounds;
+      if (tryInverse && d_config.ineqBounds && usesBounds(n.op.kind))
+      {
+        bounds = ineqBounds(n.children[i], boundsKind(n.op.kind));
+        if (bounds)
+        {
+          ++d_stats.propsWithBounds;
+          if (onlyOne && !d_rng.pickWithProb(d_config.probInverse))
+          {
+            bounds.reset();
+          }
+        }
+      }
+      bool bounded = false;
+      if (bounds)
+      {
+        if (isInvertibleWithin(n.op, i, t, ch, x, *bounds))
+        {
+          t = inverseValueWithin(n.op, i, t, ch, x, *bounds, d_rng);
+          ++d_stats.propsInv;
+          ++d_stats.propsBounded;
+          bounded = true;
+        }
+        else
+        {
+          // FMCAD'20: bounds that leave no inverse value fall back to a
+          // consistent value without bounds.
+          ++d_stats.boundsFallback;
+          tryInverse = false;
+        }
+      }
+      if (bounded)
+      {
+      }
+      else if (tryInverse && isInvertible(n.op, i, t, ch, x))
       {
         t = inverseValue(n.op, i, t, ch, x, d_rng);
         ++d_stats.propsInv;

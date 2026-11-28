@@ -57,6 +57,12 @@ BvLsSolver::BvLsSolver(Env& env)
           statisticsRegistry().registerInt("theory::bv::ls::numPropsInv")),
       d_numPropsCons(
           statisticsRegistry().registerInt("theory::bv::ls::numPropsCons")),
+      d_numPropsWithBounds(statisticsRegistry().registerInt(
+          "theory::bv::ls::numPropsWithBounds")),
+      d_numPropsBounded(
+          statisticsRegistry().registerInt("theory::bv::ls::numPropsBounded")),
+      d_numBoundsFallback(statisticsRegistry().registerInt(
+          "theory::bv::ls::numBoundsFallback")),
       d_numUpdates(
           statisticsRegistry().registerInt("theory::bv::ls::numUpdates")),
       d_numConflicts(
@@ -116,6 +122,9 @@ prop::SatValue BvLsSolver::check(const std::vector<Node>& facts)
   d_numProps += after.props - before.props;
   d_numPropsInv += after.propsInv - before.propsInv;
   d_numPropsCons += after.propsCons - before.propsCons;
+  d_numPropsWithBounds += after.propsWithBounds - before.propsWithBounds;
+  d_numPropsBounded += after.propsBounded - before.propsBounded;
+  d_numBoundsFallback += after.boundsFallback - before.boundsFallback;
   d_numUpdates += after.updates - before.updates;
   d_numConflicts += after.conflicts - before.conflicts;
   for (uint32_t k = 0; k < kNumLsKinds; ++k)

@@ -658,5 +658,91 @@ TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds)
   ASSERT_FALSE(e2.ineqBounds(y, LsKind::ULT));
 }
 
+/**
+ * prop-cb+ (Step 5): the example of FMCAD'20 Sec. V-A. With x = 110 and
+ * a = 101, a <u x gives x the bounds [102, 255], which leave no inverse
+ * value for x <u 100: the step falls back to a consistent value. With a =
+ * 50 the bounds are [51, 255], and the inverse value lies in [51, 99].
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds_moves)
+{
+  for (uint32_t a0 : {101u, 50u})
+  {
+    for (uint64_t seed = 1; seed <= 20; ++seed)
+    {
+      LsConfig config;
+      config.probInverse = 1000;
+      config.probEssential = 1000;
+      config.constBits = true;
+      config.ineqBounds = true;
+      LsEngine e(seed, config);
+      uint32_t x = mkVar(e, 8);
+      uint32_t a = mkVar(e, 8);
+      e.setRoots({e.mkOp(LsKind::EQ, {x, mkConst(e, 8, 110)}),
+                  e.mkOp(LsKind::EQ, {a, mkConst(e, 8, a0)})});
+      ASSERT_EQ(e.solve(0, 0), LsResult::SAT);
+      LsStats before = e.stats();
+      e.setRoots({e.mkOp(LsKind::ULT, {x, mkConst(e, 8, 100)}),
+                  e.mkOp(LsKind::ULT, {a, x})});
+      e.solve(1, 0);
+      const LsStats& after = e.stats();
+      ASSERT_EQ(after.propsWithBounds - before.propsWithBounds, 1u);
+      if (a0 == 101)
+      {
+        ASSERT_EQ(after.boundsFallback - before.boundsFallback, 1u);
+        ASSERT_EQ(after.propsBounded, before.propsBounded);
+      }
+      else
+      {
+        ASSERT_EQ(after.propsBounded - before.propsBounded, 1u);
+        ASSERT_EQ(after.boundsFallback, before.boundsFallback);
+        ASSERT_FALSE(e.value(x).unsignedLessThan(LsValue(8, 51)));
+        ASSERT_TRUE(e.value(x).unsignedLessThan(LsValue(8, 100)));
+      }
+    }
+  }
+}
+
+/**
+ * prop-cb+ (Step 5): on random DAGs, ineqBounds keeps the invariants, and a
+ * run in which no step found bounds is the run of prop-c.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds_random)
+{
+  uint32_t withBounds = 0;
+  uint32_t without = 0;
+  for (uint64_t seed = 1; seed <= 300; ++seed)
+  {
+    LsConfig c1;
+    c1.constBits = true;
+    LsConfig c2 = c1;
+    c2.ineqBounds = true;
+    LsEngine e1(seed, c1);
+    LsEngine e2(seed, c2);
+    LsRng r1(seed);
+    LsRng r2(seed);
+    e1.setRoots(mkRandomDag(e1, r1, 2));
+    e2.setRoots(mkRandomDag(e2, r2, 2));
+    e2.setCheckInvariants(true);
+    LsResult res1 = e1.solve(2000, 0);
+    LsResult res2 = e2.solve(2000, 0);
+    ASSERT_TRUE(e2.checkInvariants());
+    if (e2.stats().propsWithBounds == 0)
+    {
+      ++without;
+      ASSERT_EQ(res1, res2) << "seed " << seed;
+      ASSERT_EQ(e1.stats().moves, e2.stats().moves) << "seed " << seed;
+      ASSERT_EQ(e1.stats().props, e2.stats().props) << "seed " << seed;
+      ASSERT_EQ(e1.stats().updates, e2.stats().updates) << "seed " << seed;
+    }
+    else
+    {
+      ++withBounds;
+    }
+  }
+  ASSERT_GT(withBounds, 0u);
+  ASSERT_GT(without, 0u);
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
