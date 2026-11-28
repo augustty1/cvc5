@@ -2453,12 +2453,15 @@ LsBounds fullBounds(LsKind k, uint32_t w)
   return b;
 }
 
-bool usesBounds(LsKind k) { return isIneqKind(k); }
+bool usesBounds(LsKind k)
+{
+  return isIneqKind(k) || k == LsKind::AND || k == LsKind::MUL;
+}
 
 LsKind boundsKind(LsKind k)
 {
   Assert(usesBounds(k));
-  return k;
+  return isIneqKind(k) ? k : LsKind::ULT;
 }
 
 namespace {
@@ -2561,6 +2564,44 @@ InverseSamplers inverseSamplersWithin(const OpInfo& op,
       for (const LsBounds& part : parts)
       {
         DomainSampler sampler(x, part.lo, part.hi);
+        if (!sampler.empty())
+        {
+          res.samplers.push_back(sampler);
+        }
+      }
+      return res;
+    }
+    case LsKind::AND:
+    case LsKind::MUL:
+    {
+      // The inverse values matching x form a domain d (Table III): for AND,
+      // the bits of t where s is 1 and any bit elsewhere; for MUL with s = 0
+      // (then t = 0) every value, and otherwise, with c = ctz(s) and y = (t
+      // >> c) * (s >> c)^-1, the low w - c bits of y and any top c bits.
+      if (!isInvertible(op, posX, t, ch))
+      {
+        return res;
+      }
+      const LsValue& s = *ch[1 - posX];
+      std::optional<TernaryDomain> d;
+      if (op.kind == LsKind::AND)
+      {
+        d = meet(x, TernaryDomain(t & s, t | ~s));
+      }
+      else if (isZero(s))
+      {
+        d = x;
+      }
+      else
+      {
+        uint32_t c = ctz(s);
+        LsValue y = t.logicalRightShift(c) * modInverse(s.logicalRightShift(c));
+        LsValue low = LsValue::mkOnes(w).logicalRightShift(c);
+        d = meet(x, TernaryDomain(y & low, (y & low) | ~low));
+      }
+      if (d)
+      {
+        DomainSampler sampler(*d, b.lo, b.hi);
         if (!sampler.empty())
         {
           res.samplers.push_back(sampler);

@@ -214,6 +214,14 @@ name   = "Bitvector Theory"
   help       = "in --bv-ls with --bv-ls-const-bits, draw the inverse values of an inequality whose operand is a sign extension among the sign extensions (the ranges (3) and (4) of prop-cb+, FMCAD'20 Sec. V-A); no effect without --bv-ls-const-bits"
 
 [[option]]
+  name       = "bvLsIneqBoundsOps"
+  category   = "regular"
+  long       = "bv-ls-ineq-bounds-ops"
+  type       = "bool"
+  default    = "false"
+  help       = "with --bv-ls-ineq-bounds, also draw the inverse values of bvand and bvmul within the bounds of the inequalities on the operand (as Bitwuzla does, beyond FMCAD'20); no effect without --bv-ls-ineq-bounds"
+
+[[option]]
   name       = "bvLsNprops"
   category   = "expert"
   long       = "bv-ls-nprops=N"

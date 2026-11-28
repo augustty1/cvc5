@@ -325,12 +325,13 @@ LsBounds fullBounds(LsKind k, uint32_t w);
 /**
  * Return true if the inverse values of the children of an operator of kind k
  * can be drawn within bounds (prop-cb+): for the inequalities ULT and SLT,
- * as in FMCAD'20 Sec. V-A.
+ * as in FMCAD'20 Sec. V-A, and for AND and MUL, as in Bitwuzla.
  */
 bool usesBounds(LsKind k);
 
 /**
- * Return the inequality kind whose bounds the rules of k use. Requires
+ * Return the inequality kind whose bounds the rules of k use: k itself for
+ * an inequality, ULT (unsigned bounds) for AND and MUL. Requires
  * usesBounds(k).
  */
 LsKind boundsKind(LsKind k);

@@ -128,6 +128,11 @@ struct LsConfig
    * Sec. V-A). Only with constBits.
    */
   bool sextRanges = false;
+  /**
+   * With ineqBounds, also draw the inverse values of AND and MUL within the
+   * bounds of the inequalities on the operand (as Bitwuzla, beyond FMCAD'20).
+   */
+  bool boundsOps = false;
 };
 
 /**

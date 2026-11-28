@@ -718,6 +718,7 @@ TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds_random)
     LsConfig c2 = c1;
     c2.ineqBounds = true;
     c2.sextRanges = true;
+    c2.boundsOps = seed % 2 == 0;
     LsEngine e1(seed, c1);
     LsEngine e2(seed, c2);
     LsRng r1(seed);

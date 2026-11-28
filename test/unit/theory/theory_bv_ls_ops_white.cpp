@@ -2586,5 +2586,85 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_within_sext)
   }
 }
 
+/**
+ * prop-cb+ (Step 10): the rules of AND and MUL within unsigned bounds, for
+ * both positions, against brute force; at 4 bits, sampled.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, rules_and_mul_within_bounds)
+{
+  LsRng rng(19);
+  for (LsKind kind : {LsKind::AND, LsKind::MUL})
+  {
+    OpInfo op{kind};
+    ASSERT_TRUE(usesBounds(kind));
+    ASSERT_EQ(boundsKind(kind), LsKind::ULT);
+    for (uint32_t w = 1; w <= 4; ++w)
+    {
+      uint32_t n = 1u << w;
+      bool sampled = w == 4;
+      std::vector<TernaryDomain> doms = allDomains(w);
+      for (size_t di = 0; di < doms.size(); di += sampled ? 4 : 1)
+      {
+        const TernaryDomain& x = doms[di];
+        LsValue cur = x.lo();
+        for (uint32_t s = 0; s < n; ++s)
+        {
+          LsValue sv(w, s);
+          for (uint32_t pos = 0; pos < 2; ++pos)
+          {
+            LsChildren ch;
+            ch.push_back(pos == 0 ? &cur : &sv);
+            ch.push_back(pos == 0 ? &sv : &cur);
+            for (uint32_t tv = 0; tv < n; tv += sampled ? 3 : 1)
+            {
+              LsValue t(w, tv);
+              for (uint32_t lo = 0; lo < n; lo += sampled ? 3 : 1)
+              {
+                for (uint32_t hi = lo; hi < n; hi += sampled ? 2 : 1)
+                {
+                  LsBounds b{LsValue(w, lo), LsValue(w, hi)};
+                  std::vector<LsValue> sols;
+                  for (uint32_t v = lo; v <= hi; ++v)
+                  {
+                    uint32_t r =
+                        refBinary(kind, w, pos == 0 ? v : s, pos == 0 ? s : v);
+                    if (x.matches(LsValue(w, v)) && r == tv)
+                    {
+                      sols.emplace_back(w, v);
+                    }
+                  }
+                  ASSERT_EQ(isInvertibleWithin(op, pos, t, ch, x, b),
+                            !sols.empty())
+                      << kind << " w=" << w << " x=" << x << " s=" << s
+                      << " pos=" << pos << " t=" << tv << " [" << lo << ", "
+                      << hi << "]";
+                  if (sols.empty())
+                  {
+                    continue;
+                  }
+                  std::vector<bool> seen(sols.size(), false);
+                  uint32_t draws = sampled ? 8 : 40 * sols.size();
+                  for (uint32_t d = 0; d < draws; ++d)
+                  {
+                    LsValue v = inverseValueWithin(op, pos, t, ch, x, b, rng);
+                    auto it = std::find(sols.begin(), sols.end(), v);
+                    ASSERT_TRUE(it != sols.end()) << "drawn " << v;
+                    seen[it - sols.begin()] = true;
+                  }
+                  if (!sampled)
+                  {
+                    ASSERT_TRUE(std::all_of(
+                        seen.begin(), seen.end(), [](bool c) { return c; }));
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace cvc5::internal

@@ -416,7 +416,8 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
       // a non-zero probability (D38).
       std::optional<LsBounds> bounds;
       uint32_t sextFrom = 0;
-      if (tryInverse && isIneqKind(n.op.kind))
+      if (tryInverse && usesBounds(n.op.kind)
+          && (isIneqKind(n.op.kind) || d_config.boundsOps))
       {
         if (d_config.ineqBounds)
         {
@@ -426,7 +427,7 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
             ++d_stats.propsWithBounds;
           }
         }
-        if (d_config.sextRanges)
+        if (d_config.sextRanges && isIneqKind(n.op.kind))
         {
           sextFrom = sextWidth(n.children[i]);
           if (sextFrom > 0)

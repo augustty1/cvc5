@@ -32,6 +32,7 @@ LsConfig mkConfig(const Options& opts)
   config.constBits = opts.bv.bvLsConstBits;
   config.ineqBounds = opts.bv.bvLsConstBits && opts.bv.bvLsIneqBounds;
   config.sextRanges = opts.bv.bvLsConstBits && opts.bv.bvLsSextRanges;
+  config.boundsOps = config.ineqBounds && opts.bv.bvLsIneqBoundsOps;
   return config;
 }
 
