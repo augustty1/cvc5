@@ -98,6 +98,12 @@ struct LsConfig
    * the same random draws.
    */
   bool constBits = false;
+  /**
+   * Draw the inverse values of inequalities within the bounds given by the
+   * satisfied inequality roots on the same operand (prop-cb+, FMCAD'20 Sec.
+   * V-A). Only with constBits.
+   */
+  bool ineqBounds = false;
 };
 
 /**

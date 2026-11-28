@@ -30,6 +30,7 @@ LsConfig mkConfig(const Options& opts)
   config.probInverse = opts.bv.bvLsProbInv;
   config.probEssential = opts.bv.bvLsProbEss;
   config.constBits = opts.bv.bvLsConstBits;
+  config.ineqBounds = opts.bv.bvLsConstBits && opts.bv.bvLsIneqBounds;
   return config;
 }
 

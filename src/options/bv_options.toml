@@ -190,6 +190,14 @@ name   = "Bitvector Theory"
   help       = "in --bv-ls with --bv-ls-const-bits, handle bvxor, bvashr and sign_extend as native local search operators instead of encoding them with the base operators (prop-c+, FMCAD'20); no effect without --bv-ls-const-bits"
 
 [[option]]
+  name       = "bvLsIneqBounds"
+  category   = "regular"
+  long       = "bv-ls-ineq-bounds"
+  type       = "bool"
+  default    = "false"
+  help       = "in --bv-ls with --bv-ls-const-bits, draw the inverse values of inequalities within the bounds given by the satisfied top-level inequalities on the same operand (prop-cb+, FMCAD'20 Sec. V-A); no effect without --bv-ls-const-bits"
+
+[[option]]
   name       = "bvLsNprops"
   category   = "expert"
   long       = "bv-ls-nprops=N"
