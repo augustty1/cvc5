@@ -614,5 +614,49 @@ TEST_F(TestTheoryWhiteBvLsEngine, ineq_roots)
   }
 }
 
+/**
+ * prop-cb+ (Step 3): the bounds of a node are the intersection of the
+ * solutions of the asserted inequalities on it that hold with their
+ * polarity; other parents give none.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds)
+{
+  LsConfig config;
+  config.constBits = true;
+  config.ineqBounds = true;
+  LsEngine e(1, config);
+  uint32_t x = mkVar(e, 8);
+  uint32_t a = mkVar(e, 8);
+  uint32_t c110 = mkConst(e, 8, 110);
+  uint32_t c101 = mkConst(e, 8, 101);
+  // x = 110 and a = 101.
+  e.setRoots({e.mkOp(LsKind::EQ, {x, c110}), e.mkOp(LsKind::EQ, {a, c101})});
+  ASSERT_EQ(e.solve(0, 0), LsResult::SAT);
+  ASSERT_EQ(e.value(x), LsValue(8, 110));
+  ASSERT_EQ(e.value(a), LsValue(8, 101));
+  // a <u x gives x in [102, 255] and a in [0, 109]; x <u 120, [0, 119];
+  // not (x <u 105), [105, 255]; x = 110 is no inequality.
+  uint32_t ax = e.mkOp(LsKind::ULT, {a, x});
+  uint32_t x120 = e.mkOp(LsKind::ULT, {x, mkConst(e, 8, 120)});
+  uint32_t x105 = e.mkOp(LsKind::ULT, {x, mkConst(e, 8, 105)});
+  e.setRoots(
+      {ax, x120, e.mkOp(LsKind::NOT, {x105}), e.mkOp(LsKind::EQ, {x, c110})});
+  ASSERT_EQ(e.solve(0, 0), LsResult::SAT);
+  std::optional<LsBounds> bx = e.ineqBounds(x, LsKind::ULT);
+  ASSERT_TRUE(bx);
+  ASSERT_EQ(bx->lo, LsValue(8, 105));
+  ASSERT_EQ(bx->hi, LsValue(8, 119));
+  std::optional<LsBounds> ba = e.ineqBounds(a, LsKind::ULT);
+  ASSERT_TRUE(ba);
+  ASSERT_EQ(ba->lo, LsValue(8, 0));
+  ASSERT_EQ(ba->hi, LsValue(8, 109));
+  // Without ineqBounds there are no bounds.
+  LsEngine e2(1);
+  uint32_t y = mkVar(e2, 8);
+  e2.setRoots({e2.mkOp(LsKind::ULT, {y, mkConst(e2, 8, 5)})});
+  ASSERT_EQ(e2.solve(0, 0), LsResult::SAT);
+  ASSERT_FALSE(e2.ineqBounds(y, LsKind::ULT));
+}
+
 }  // namespace test
 }  // namespace cvc5::internal

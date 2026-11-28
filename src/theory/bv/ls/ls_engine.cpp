@@ -20,13 +20,6 @@ namespace theory {
 namespace bv {
 namespace ls {
 
-namespace {
-
-/** Return true if k is an inequality whose operands can get bounds. */
-bool isIneqKind(LsKind k) { return k == LsKind::ULT; }
-
-}  // namespace
-
 LsEngine::LsEngine(uint64_t seed, LsConfig config)
     : d_config(config), d_rng(seed)
 {
@@ -306,6 +299,48 @@ LsResult LsEngine::solve(uint64_t maxProps,
     }
   }
   return LsResult::SAT;
+}
+
+std::optional<LsBounds> LsEngine::ineqBounds(uint32_t id, LsKind k) const
+{
+  Assert(isIneqKind(k));
+  std::optional<LsBounds> res;
+  if (id >= d_ineqRoot.size())
+  {
+    return res;
+  }
+  for (uint32_t p : d_parents[id])
+  {
+    const Node& n = d_nodes[p];
+    if (n.op.kind != k || d_ineqRoot[p] == 0)
+    {
+      continue;
+    }
+    // Only an inequality that holds with the polarity it is asserted with.
+    bool holds = n.value.isBitSet(0);
+    if ((d_ineqRoot[p] & (holds ? kIneqPos : kIneqNeg)) == 0)
+    {
+      continue;
+    }
+    uint32_t c0 = n.children[0];
+    uint32_t c1 = n.children[1];
+    if (c0 == c1)
+    {
+      continue;
+    }
+    uint32_t pos = c0 == id ? 0 : 1;
+    std::optional<LsBounds> b =
+        ineqSolutions(k, pos, holds, d_nodes[n.children[1 - pos]].value);
+    // The current value of id is a solution of every such inequality.
+    Assert(b);
+    res = res ? meetBounds(k, *res, *b) : b;
+    Assert(res);
+  }
+  if (res && isFullBounds(k, *res))
+  {
+    return std::nullopt;
+  }
+  return res;
 }
 
 std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)

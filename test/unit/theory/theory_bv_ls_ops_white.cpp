@@ -9,6 +9,7 @@
  * (theory/bv/ls/ls_ops.h).
  */
 
+#include <algorithm>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -2199,6 +2200,64 @@ TEST_F(TestTheoryWhiteBvLsOps, forward_domain_wide)
           ASSERT_TRUE(fd.matches(v))
               << k << " w=" << w << " x=" << ds[0] << " y=" << ds[1]
               << " domain=" << fd << " a=" << a << " b=" << b << " v=" << v;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * prop-cb+ (Step 3): the solutions of one inequality form the interval that
+ * ineqSolutions returns, and meetBounds is the intersection, against brute
+ * force.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, ineq_solutions_and_meet)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    uint32_t n = 1u << w;
+    for (uint32_t s = 0; s < n; ++s)
+    {
+      for (uint32_t pos = 0; pos < 2; ++pos)
+      {
+        for (bool holds : {false, true})
+        {
+          std::optional<LsBounds> b =
+              ineqSolutions(LsKind::ULT, pos, holds, LsValue(w, s));
+          for (uint32_t v = 0; v < n; ++v)
+          {
+            bool sol = (pos == 0 ? v < s : s < v) == holds;
+            bool in = b && !LsValue(w, v).unsignedLessThan(b->lo)
+                      && !b->hi.unsignedLessThan(LsValue(w, v));
+            ASSERT_EQ(sol, in) << "w=" << w << " s=" << s << " pos=" << pos
+                               << " holds=" << holds << " v=" << v;
+          }
+        }
+      }
+    }
+    for (uint32_t a = 0; a < n; ++a)
+    {
+      for (uint32_t b = a; b < n; ++b)
+      {
+        for (uint32_t c = 0; c < n; ++c)
+        {
+          for (uint32_t d = c; d < n; ++d)
+          {
+            std::optional<LsBounds> m =
+                meetBounds(LsKind::ULT,
+                           {LsValue(w, a), LsValue(w, b)},
+                           {LsValue(w, c), LsValue(w, d)});
+            uint32_t lo = std::max(a, c);
+            uint32_t hi = std::min(b, d);
+            ASSERT_EQ(m.has_value(), lo <= hi);
+            if (m)
+            {
+              ASSERT_EQ(m->lo, LsValue(w, lo));
+              ASSERT_EQ(m->hi, LsValue(w, hi));
+            }
+            ASSERT_EQ(isFullBounds(LsKind::ULT, {LsValue(w, a), LsValue(w, b)}),
+                      a == 0 && b == n - 1);
+          }
         }
       }
     }

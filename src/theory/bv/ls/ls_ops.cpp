@@ -2263,6 +2263,58 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
   Unreachable() << "forwardDomain called on leaf kind " << op.kind;
 }
 
+bool isIneqKind(LsKind k) { return k == LsKind::ULT; }
+
+std::optional<LsBounds> ineqSolutions(LsKind k,
+                                      uint32_t posX,
+                                      bool holds,
+                                      const LsValue& s)
+{
+  Assert(isIneqKind(k));
+  Assert(posX < 2);
+  uint32_t w = s.getSize();
+  LsValue zero = LsValue::mkZero(w);
+  LsValue ones = LsValue::mkOnes(w);
+  if (posX == 0)
+  {
+    // x <u s: [0, s - 1], empty for s = 0; x >=u s: [s, ones].
+    if (holds)
+    {
+      return isZero(s) ? std::nullopt
+                       : std::optional<LsBounds>(LsBounds{zero, dec(s)});
+    }
+    return LsBounds{s, ones};
+  }
+  // s <u x: [s + 1, ones], empty for s = ones; s >=u x: [0, s].
+  if (holds)
+  {
+    return isOnes(s) ? std::nullopt
+                     : std::optional<LsBounds>(LsBounds{inc(s), ones});
+  }
+  return LsBounds{zero, s};
+}
+
+std::optional<LsBounds> meetBounds(LsKind k,
+                                   const LsBounds& a,
+                                   const LsBounds& b)
+{
+  Assert(isIneqKind(k));
+  Assert(a.lo.getSize() == b.lo.getSize());
+  const LsValue& lo = a.lo.unsignedLessThan(b.lo) ? b.lo : a.lo;
+  const LsValue& hi = a.hi.unsignedLessThan(b.hi) ? a.hi : b.hi;
+  if (hi.unsignedLessThan(lo))
+  {
+    return std::nullopt;
+  }
+  return LsBounds{lo, hi};
+}
+
+bool isFullBounds(LsKind k, const LsBounds& b)
+{
+  Assert(isIneqKind(k));
+  return isZero(b.lo) && isOnes(b.hi);
+}
+
 }  // namespace ls
 }  // namespace bv
 }  // namespace theory

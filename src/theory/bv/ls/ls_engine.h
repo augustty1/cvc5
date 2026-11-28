@@ -204,6 +204,16 @@ class LsEngine
            && (d_ineqRoot[id] & (positive ? kIneqPos : kIneqNeg)) != 0;
   }
 
+  /**
+   * Return the bounds of node id from the inequalities of kind k: the
+   * intersection of the solutions of the asserted inequalities of kind k on
+   * id that hold with their polarity under the current values (prop-cb+,
+   * FMCAD'20 Sec. V-A). Nothing if there is no such inequality or the
+   * intersection is every value. The current value of id is always within
+   * the bounds. Requires the prepared roots; nothing without ineqBounds.
+   */
+  std::optional<LsBounds> ineqBounds(uint32_t id, LsKind k) const;
+
   const LsStats& stats() const { return d_stats; }
 
   /** Check the engine invariants after every move (expensive). */

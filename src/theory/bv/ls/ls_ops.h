@@ -279,6 +279,43 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
  */
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 
+/*
+ * Bounds from inequalities (prop-cb+, FMCAD'20 Sec. V-A): the satisfied
+ * top-level inequalities on an operand give an interval that the inverse
+ * values of other inequalities on it are drawn from.
+ */
+
+/**
+ * An interval [lo, hi] of values of one width, with lo <= hi in the order of
+ * the inequality kind it belongs to (unsigned for ULT).
+ */
+struct LsBounds
+{
+  LsValue lo;
+  LsValue hi;
+};
+
+/** Return true if k is an inequality kind whose operands can get bounds. */
+bool isIneqKind(LsKind k);
+
+/**
+ * Return the values x of the width of s such that (x op s) = holds (posX =
+ * 0) or (s op x) = holds (posX = 1), for the inequality kind k. They form an
+ * interval in the order of k, or nothing if there is no such value.
+ */
+std::optional<LsBounds> ineqSolutions(LsKind k,
+                                      uint32_t posX,
+                                      bool holds,
+                                      const LsValue& s);
+
+/** Return the intersection of a and b for kind k, or nothing if empty. */
+std::optional<LsBounds> meetBounds(LsKind k,
+                                   const LsBounds& a,
+                                   const LsBounds& b);
+
+/** Return true if b contains every value of its width, for kind k. */
+bool isFullBounds(LsKind k, const LsBounds& b);
+
 }  // namespace ls
 }  // namespace bv
 }  // namespace theory
