@@ -698,6 +698,8 @@ set(regress_0_tests
   regress0/bv/issue13039.smt2
   regress0/bv/issue13039-2-concat.smt2
   regress0/bv/le-elim-conv.smt2
+  regress0/bv/ls/ls-cbounds-sat.smt2
+  regress0/bv/ls/ls-cbounds-unsat.smt2
   regress0/bv/ls/ls-cbits-incremental.smt2
   regress0/bv/ls/ls-cbits-purify.smt2
   regress0/bv/ls/ls-cbits-sat.smt2
