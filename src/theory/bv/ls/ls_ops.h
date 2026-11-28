@@ -316,6 +316,46 @@ std::optional<LsBounds> meetBounds(LsKind k,
 /** Return true if b contains every value of its width, for kind k. */
 bool isFullBounds(LsKind k, const LsBounds& b);
 
+/**
+ * Return true if the inverse values of the children of an operator of kind k
+ * can be drawn within bounds (prop-cb+): for the inequalities, as in FMCAD'20
+ * Sec. V-A.
+ */
+bool usesBounds(LsKind k);
+
+/**
+ * Return the inequality kind whose bounds the rules of k use. Requires
+ * usesBounds(k).
+ */
+LsKind boundsKind(LsKind k);
+
+/**
+ * Return true if there is a value x' matching x and within bounds b (in the
+ * order of boundsKind(op.kind)) for child posX such that op evaluates to t
+ * with the other children fixed. Requires usesBounds(op.kind). Does not draw
+ * random numbers.
+ */
+bool isInvertibleWithin(const OpInfo& op,
+                        uint32_t posX,
+                        const LsValue& t,
+                        const LsChildren& ch,
+                        const TernaryDomain& x,
+                        const LsBounds& b);
+
+/**
+ * Return a random value x' matching x and within bounds b for child posX
+ * such that op evaluates to t with the other children fixed; every such
+ * value has a non-zero probability. Requires isInvertibleWithin(op, posX, t,
+ * ch, x, b).
+ */
+LsValue inverseValueWithin(const OpInfo& op,
+                           uint32_t posX,
+                           const LsValue& t,
+                           const LsChildren& ch,
+                           const TernaryDomain& x,
+                           const LsBounds& b,
+                           LsRng& rng);
+
 }  // namespace ls
 }  // namespace bv
 }  // namespace theory

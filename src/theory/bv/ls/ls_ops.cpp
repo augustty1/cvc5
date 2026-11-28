@@ -2315,6 +2315,93 @@ bool isFullBounds(LsKind k, const LsBounds& b)
   return isZero(b.lo) && isOnes(b.hi);
 }
 
+bool usesBounds(LsKind k) { return k == LsKind::ULT; }
+
+LsKind boundsKind(LsKind k)
+{
+  Assert(usesBounds(k));
+  return k;
+}
+
+namespace {
+
+/**
+ * Return a sampler of the inverse values of child posX that match x and lie
+ * within b, or nothing if there is none.
+ */
+std::optional<DomainSampler> inverseSamplerWithin(const OpInfo& op,
+                                                  uint32_t posX,
+                                                  const LsValue& t,
+                                                  const LsChildren& ch,
+                                                  const TernaryDomain& x,
+                                                  const LsBounds& b)
+{
+  Assert(usesBounds(op.kind));
+  Assert(b.lo.getSize() == x.getSize());
+  switch (op.kind)
+  {
+    case LsKind::ULT:
+    {
+      // The inverse values of an inequality are its solutions for t, an
+      // interval; FMCAD'20 Sec. V-A draws them within the bounds.
+      std::optional<LsBounds> r =
+          ineqSolutions(op.kind, posX, t.isBitSet(0), *ch[1 - posX]);
+      if (!r)
+      {
+        return std::nullopt;
+      }
+      std::optional<LsBounds> m = meetBounds(op.kind, *r, b);
+      if (!m)
+      {
+        return std::nullopt;
+      }
+      DomainSampler sampler(x, m->lo, m->hi);
+      if (sampler.empty())
+      {
+        return std::nullopt;
+      }
+      return sampler;
+    }
+    default: break;
+  }
+  Unreachable() << "no rules within bounds for " << op.kind;
+}
+
+}  // namespace
+
+bool isInvertibleWithin(const OpInfo& op,
+                        uint32_t posX,
+                        const LsValue& t,
+                        const LsChildren& ch,
+                        const TernaryDomain& x,
+                        const LsBounds& b)
+{
+  return inverseSamplerWithin(op, posX, t, ch, x, b).has_value();
+}
+
+LsValue inverseValueWithin(const OpInfo& op,
+                           uint32_t posX,
+                           const LsValue& t,
+                           const LsChildren& ch,
+                           const TernaryDomain& x,
+                           const LsBounds& b,
+                           LsRng& rng)
+{
+  std::optional<DomainSampler> sampler =
+      inverseSamplerWithin(op, posX, t, ch, x, b);
+  Assert(sampler);
+  LsValue v = sampler->random(rng);
+#ifdef CVC5_ASSERTIONS
+  Assert(x.matches(v));
+  LsChildren chx = ch;
+  chx[posX] = &v;
+  Assert(evaluate(op, chx) == t)
+      << "inverse value " << v << " within bounds for " << op.kind << " at "
+      << posX << " does not produce " << t;
+#endif
+  return v;
+}
+
 }  // namespace ls
 }  // namespace bv
 }  // namespace theory

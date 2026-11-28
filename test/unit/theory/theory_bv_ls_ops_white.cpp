@@ -2264,5 +2264,81 @@ TEST_F(TestTheoryWhiteBvLsOps, ineq_solutions_and_meet)
   }
 }
 
+/**
+ * prop-cb+ (Step 4): the ULT rules within bounds against brute force. Every
+ * domain up to 3 bits and every interval: the condition holds iff some
+ * solution matches x and lies within the bounds, every value drawn is such a
+ * solution, and every such solution is drawn. At 4 bits, sampled domains and
+ * intervals, without the coverage check.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, rules_ult_within_bounds)
+{
+  OpInfo op{LsKind::ULT};
+  LsRng rng(11);
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    uint32_t n = 1u << w;
+    bool sampled = w == 4;
+    std::vector<TernaryDomain> doms = allDomains(w);
+    for (size_t di = 0; di < doms.size(); di += sampled ? 4 : 1)
+    {
+      const TernaryDomain& x = doms[di];
+      LsValue cur = x.lo();
+      for (uint32_t s = 0; s < n; ++s)
+      {
+        LsValue sv(w, s);
+        for (uint32_t pos = 0; pos < 2; ++pos)
+        {
+          LsChildren ch;
+          ch.push_back(pos == 0 ? &cur : &sv);
+          ch.push_back(pos == 0 ? &sv : &cur);
+          for (uint32_t tv = 0; tv < 2; ++tv)
+          {
+            LsValue t(1, tv);
+            for (uint32_t lo = 0; lo < n; lo += sampled ? 3 : 1)
+            {
+              for (uint32_t hi = lo; hi < n; hi += sampled ? 2 : 1)
+              {
+                LsBounds b{LsValue(w, lo), LsValue(w, hi)};
+                std::vector<LsValue> sols;
+                for (uint32_t v = lo; v <= hi; ++v)
+                {
+                  bool lt = pos == 0 ? v < s : s < v;
+                  if (x.matches(LsValue(w, v)) && lt == (tv == 1))
+                  {
+                    sols.emplace_back(w, v);
+                  }
+                }
+                ASSERT_EQ(isInvertibleWithin(op, pos, t, ch, x, b),
+                          !sols.empty())
+                    << "w=" << w << " x=" << x << " s=" << s << " pos=" << pos
+                    << " t=" << tv << " [" << lo << ", " << hi << "]";
+                if (sols.empty())
+                {
+                  continue;
+                }
+                std::vector<bool> seen(sols.size(), false);
+                uint32_t draws = sampled ? 16 : 40 * sols.size();
+                for (uint32_t k = 0; k < draws; ++k)
+                {
+                  LsValue v = inverseValueWithin(op, pos, t, ch, x, b, rng);
+                  auto it = std::find(sols.begin(), sols.end(), v);
+                  ASSERT_TRUE(it != sols.end()) << "drawn " << v;
+                  seen[it - sols.begin()] = true;
+                }
+                if (!sampled)
+                {
+                  ASSERT_TRUE(std::all_of(
+                      seen.begin(), seen.end(), [](bool b) { return b; }));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
