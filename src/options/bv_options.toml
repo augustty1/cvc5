@@ -206,6 +206,14 @@ name   = "Bitvector Theory"
   help       = "in --bv-ls with --bv-ls-const-bits, handle the signed inequalities as a native local search operator instead of encoding them with unsigned ones (prop-cb+, FMCAD'20); no effect without --bv-ls-const-bits"
 
 [[option]]
+  name       = "bvLsSextRanges"
+  category   = "regular"
+  long       = "bv-ls-sext-ranges"
+  type       = "bool"
+  default    = "false"
+  help       = "in --bv-ls with --bv-ls-const-bits, draw the inverse values of an inequality whose operand is a sign extension among the sign extensions (the ranges (3) and (4) of prop-cb+, FMCAD'20 Sec. V-A); no effect without --bv-ls-const-bits"
+
+[[option]]
   name       = "bvLsNprops"
   category   = "expert"
   long       = "bv-ls-nprops=N"

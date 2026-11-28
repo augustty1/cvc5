@@ -2347,7 +2347,7 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_ult_within_bounds)
                 if (!sampled)
                 {
                   ASSERT_TRUE(std::all_of(
-                      seen.begin(), seen.end(), [](bool b) { return b; }));
+                      seen.begin(), seen.end(), [](bool c) { return c; }));
                 }
               }
             }
@@ -2482,6 +2482,101 @@ TEST_F(TestTheoryWhiteBvLsOps, slt_bounds)
               {
                 ASSERT_TRUE(std::all_of(
                     seen.begin(), seen.end(), [](bool c) { return c; }));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * prop-cb+ (Step 9): the rules of ULT and SLT within bounds and among the
+ * sign extensions of k-bit values (the ranges (3) and (4) of FMCAD'20), for
+ * every k < w, against brute force; at 4 bits, sampled.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, rules_within_sext)
+{
+  LsRng rng(17);
+  for (LsKind kind : {LsKind::ULT, LsKind::SLT})
+  {
+    OpInfo op{kind};
+    for (uint32_t w = 2; w <= 4; ++w)
+    {
+      uint32_t n = 1u << w;
+      uint32_t m = kind == LsKind::SLT ? 1u << (w - 1) : 0;
+      auto f = [m](uint32_t v) { return v ^ m; };
+      bool sampled = w == 4;
+      std::vector<std::pair<uint32_t, uint32_t>> ivs;
+      for (uint32_t a = 0; a < n; ++a)
+      {
+        for (uint32_t b = a; b < n; ++b)
+        {
+          ivs.emplace_back(f(a), f(b));
+        }
+      }
+      std::vector<TernaryDomain> doms = allDomains(w);
+      for (uint32_t k = 1; k < w; ++k)
+      {
+        auto isSext = [w, k](uint32_t v) {
+          uint32_t top = v >> (k - 1);
+          return top == 0 || top == (1u << (w - k + 1)) - 1;
+        };
+        for (size_t di = 0; di < doms.size(); di += sampled ? 5 : 1)
+        {
+          const TernaryDomain& x = doms[di];
+          LsValue cur = x.lo();
+          for (uint32_t s = 0; s < n; s += sampled ? 3 : 1)
+          {
+            LsValue sv(w, s);
+            for (uint32_t pos = 0; pos < 2; ++pos)
+            {
+              LsChildren ch;
+              ch.push_back(pos == 0 ? &cur : &sv);
+              ch.push_back(pos == 0 ? &sv : &cur);
+              for (uint32_t tv = 0; tv < 2; ++tv)
+              {
+                LsValue t(1, tv);
+                for (size_t iv = 0; iv < ivs.size(); iv += sampled ? 7 : 3)
+                {
+                  auto [lo, hi] = ivs[iv];
+                  LsBounds b{LsValue(w, lo), LsValue(w, hi)};
+                  std::vector<LsValue> sols;
+                  for (uint32_t v = 0; v < n; ++v)
+                  {
+                    bool lt = pos == 0 ? f(v) < f(s) : f(s) < f(v);
+                    if (x.matches(LsValue(w, v)) && lt == (tv == 1)
+                        && f(lo) <= f(v) && f(v) <= f(hi) && isSext(v))
+                    {
+                      sols.emplace_back(w, v);
+                    }
+                  }
+                  ASSERT_EQ(isInvertibleWithin(op, pos, t, ch, x, b, k),
+                            !sols.empty())
+                      << kind << " w=" << w << " k=" << k << " x=" << x
+                      << " s=" << s << " pos=" << pos << " t=" << tv << " ["
+                      << lo << ", " << hi << "]";
+                  if (sols.empty())
+                  {
+                    continue;
+                  }
+                  std::vector<bool> seen(sols.size(), false);
+                  uint32_t draws = sampled ? 16 : 60 * sols.size();
+                  for (uint32_t d = 0; d < draws; ++d)
+                  {
+                    LsValue v =
+                        inverseValueWithin(op, pos, t, ch, x, b, rng, k);
+                    auto it = std::find(sols.begin(), sols.end(), v);
+                    ASSERT_TRUE(it != sols.end()) << "drawn " << v;
+                    seen[it - sols.begin()] = true;
+                  }
+                  if (!sampled)
+                  {
+                    ASSERT_TRUE(std::all_of(
+                        seen.begin(), seen.end(), [](bool c) { return c; }));
+                  }
+                }
               }
             }
           }

@@ -319,6 +319,9 @@ std::optional<LsBounds> meetBounds(LsKind k,
 /** Return true if b contains every value of its width, for kind k. */
 bool isFullBounds(LsKind k, const LsBounds& b);
 
+/** Return the bounds of kind k that contain every value of width w. */
+LsBounds fullBounds(LsKind k, uint32_t w);
+
 /**
  * Return true if the inverse values of the children of an operator of kind k
  * can be drawn within bounds (prop-cb+): for the inequalities ULT and SLT,
@@ -335,21 +338,26 @@ LsKind boundsKind(LsKind k);
 /**
  * Return true if there is a value x' matching x and within bounds b (in the
  * order of boundsKind(op.kind)) for child posX such that op evaluates to t
- * with the other children fixed. Requires usesBounds(op.kind). Does not draw
- * random numbers.
+ * with the other children fixed. If sextFrom > 0, x' must also be the sign
+ * extension of a sextFrom-bit value (the ranges (3) and (4) of FMCAD'20 Sec.
+ * V-A, for inequalities over a sign extension), with sextFrom smaller than
+ * the width of x. Requires usesBounds(op.kind), and isIneqKind(op.kind) if
+ * sextFrom > 0. Does not draw random numbers.
  */
 bool isInvertibleWithin(const OpInfo& op,
                         uint32_t posX,
                         const LsValue& t,
                         const LsChildren& ch,
                         const TernaryDomain& x,
-                        const LsBounds& b);
+                        const LsBounds& b,
+                        uint32_t sextFrom = 0);
 
 /**
- * Return a random value x' matching x and within bounds b for child posX
- * such that op evaluates to t with the other children fixed; every such
- * value has a non-zero probability. Requires isInvertibleWithin(op, posX, t,
- * ch, x, b).
+ * Return a random value x' matching x and within bounds b (and a sign
+ * extension of a sextFrom-bit value if sextFrom > 0) for child posX such
+ * that op evaluates to t with the other children fixed; every such value has
+ * a non-zero probability. Requires isInvertibleWithin(op, posX, t, ch, x, b,
+ * sextFrom).
  */
 LsValue inverseValueWithin(const OpInfo& op,
                            uint32_t posX,
@@ -357,7 +365,8 @@ LsValue inverseValueWithin(const OpInfo& op,
                            const LsChildren& ch,
                            const TernaryDomain& x,
                            const LsBounds& b,
-                           LsRng& rng);
+                           LsRng& rng,
+                           uint32_t sextFrom = 0);
 
 }  // namespace ls
 }  // namespace bv

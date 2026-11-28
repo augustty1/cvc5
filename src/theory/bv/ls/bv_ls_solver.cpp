@@ -31,6 +31,7 @@ LsConfig mkConfig(const Options& opts)
   config.probEssential = opts.bv.bvLsProbEss;
   config.constBits = opts.bv.bvLsConstBits;
   config.ineqBounds = opts.bv.bvLsConstBits && opts.bv.bvLsIneqBounds;
+  config.sextRanges = opts.bv.bvLsConstBits && opts.bv.bvLsSextRanges;
   return config;
 }
 
@@ -64,6 +65,10 @@ BvLsSolver::BvLsSolver(Env& env)
           statisticsRegistry().registerInt("theory::bv::ls::numPropsBounded")),
       d_numBoundsFallback(statisticsRegistry().registerInt(
           "theory::bv::ls::numBoundsFallback")),
+      d_numPropsWithSext(
+          statisticsRegistry().registerInt("theory::bv::ls::numPropsWithSext")),
+      d_numPropsSextRange(statisticsRegistry().registerInt(
+          "theory::bv::ls::numPropsSextRange")),
       d_numUpdates(
           statisticsRegistry().registerInt("theory::bv::ls::numUpdates")),
       d_numConflicts(
@@ -126,6 +131,8 @@ prop::SatValue BvLsSolver::check(const std::vector<Node>& facts)
   d_numPropsWithBounds += after.propsWithBounds - before.propsWithBounds;
   d_numPropsBounded += after.propsBounded - before.propsBounded;
   d_numBoundsFallback += after.boundsFallback - before.boundsFallback;
+  d_numPropsWithSext += after.propsWithSext - before.propsWithSext;
+  d_numPropsSextRange += after.propsSextRange - before.propsSextRange;
   d_numUpdates += after.updates - before.updates;
   d_numConflicts += after.conflicts - before.conflicts;
   for (uint32_t k = 0; k < kNumLsKinds; ++k)

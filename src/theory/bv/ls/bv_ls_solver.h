@@ -141,6 +141,9 @@ class BvLsSolver : protected EnvObj
   IntStat d_numPropsWithBounds;
   IntStat d_numPropsBounded;
   IntStat d_numBoundsFallback;
+  /** prop-cb+: steps over a sign extension, and drawn in its ranges. */
+  IntStat d_numPropsWithSext;
+  IntStat d_numPropsSextRange;
   IntStat d_numUpdates;
   IntStat d_numConflicts;
   IntStat d_numRoots;

@@ -2442,6 +2442,17 @@ bool isFullBounds(LsKind k, const LsBounds& b)
   return isZero(b.lo) && isOnes(b.hi);
 }
 
+LsBounds fullBounds(LsKind k, uint32_t w)
+{
+  Assert(isIneqKind(k));
+  LsBounds b{LsValue::mkZero(w), LsValue::mkOnes(w)};
+  if (k == LsKind::SLT)
+  {
+    return {flipMsb(b.lo), flipMsb(b.hi)};
+  }
+  return b;
+}
+
 bool usesBounds(LsKind k) { return isIneqKind(k); }
 
 LsKind boundsKind(LsKind k)
@@ -2453,44 +2464,62 @@ LsKind boundsKind(LsKind k)
 namespace {
 
 /**
- * A sampler of inverse values, and whether the values it draws are to be
+ * The samplers of the inverse values within the bounds, at most two (the two
+ * ranges of the sign extensions), and whether the values they draw are to be
  * flipped back (SLT).
  */
-struct InverseSampler
+struct InverseSamplers
 {
-  DomainSampler sampler;
-  bool flip;
+  std::vector<DomainSampler> samplers;
+  bool flip = false;
 };
 
 /**
- * Return a sampler of the inverse values of child posX that match x and lie
- * within b, or nothing if there is none.
+ * Return the samplers of the inverse values of child posX that match x, lie
+ * within b and, if sextFrom > 0, are sign extensions of sextFrom-bit values;
+ * no sampler if there is no such value.
  */
-std::optional<InverseSampler> inverseSamplerWithin(const OpInfo& op,
-                                                   uint32_t posX,
-                                                   const LsValue& t,
-                                                   const LsChildren& ch,
-                                                   const TernaryDomain& x,
-                                                   const LsBounds& b)
+InverseSamplers inverseSamplersWithin(const OpInfo& op,
+                                      uint32_t posX,
+                                      const LsValue& t,
+                                      const LsChildren& ch,
+                                      const TernaryDomain& x,
+                                      const LsBounds& b,
+                                      uint32_t sextFrom)
 {
   Assert(usesBounds(op.kind));
-  Assert(b.lo.getSize() == x.getSize());
+  uint32_t w = x.getSize();
+  Assert(b.lo.getSize() == w);
+  Assert(sextFrom < w);
+  Assert(sextFrom == 0 || isIneqKind(op.kind));
+  InverseSamplers res;
   switch (op.kind)
   {
     case LsKind::SLT:
     {
-      FlippedChildren f(ch);
-      std::optional<InverseSampler> res =
-          inverseSamplerWithin(kUltOp,
-                               posX,
-                               t,
-                               f.get(),
-                               flipMsbD(x),
-                               {flipMsb(b.lo), flipMsb(b.hi)});
-      if (res)
+      // The sign extensions of sextFrom-bit values are the signed interval
+      // [-2^(sextFrom-1), 2^(sextFrom-1) - 1].
+      LsBounds bs = b;
+      if (sextFrom > 0)
       {
-        res->flip = true;
+        LsValue half = LsValue::mkOne(w).leftShift(sextFrom - 1);
+        std::optional<LsBounds> m =
+            meetBounds(LsKind::SLT, b, {LsValue::mkZero(w) - half, dec(half)});
+        if (!m)
+        {
+          return res;
+        }
+        bs = *m;
       }
+      FlippedChildren f(ch);
+      res = inverseSamplersWithin(kUltOp,
+                                  posX,
+                                  t,
+                                  f.get(),
+                                  flipMsbD(x),
+                                  {flipMsb(bs.lo), flipMsb(bs.hi)},
+                                  0);
+      res.flip = true;
       return res;
     }
     case LsKind::ULT:
@@ -2501,23 +2530,65 @@ std::optional<InverseSampler> inverseSamplerWithin(const OpInfo& op,
           ineqSolutions(op.kind, posX, t.isBitSet(0), *ch[1 - posX]);
       if (!r)
       {
-        return std::nullopt;
+        return res;
       }
       std::optional<LsBounds> m = meetBounds(op.kind, *r, b);
       if (!m)
       {
-        return std::nullopt;
+        return res;
       }
-      DomainSampler sampler(x, m->lo, m->hi);
-      if (sampler.empty())
+      std::vector<LsBounds> parts;
+      if (sextFrom == 0)
       {
-        return std::nullopt;
+        parts.push_back(*m);
       }
-      return InverseSampler{sampler, false};
+      else
+      {
+        // The sign extensions of sextFrom-bit values with the sign bit 0,
+        // [0, 2^(sextFrom-1) - 1] (range (4) of FMCAD'20), and with the sign
+        // bit 1, [2^w - 2^(sextFrom-1), ones] (range (3)).
+        LsValue half = LsValue::mkOne(w).leftShift(sextFrom - 1);
+        for (const LsBounds& range :
+             {LsBounds{LsValue::mkZero(w), dec(half)},
+              LsBounds{LsValue::mkZero(w) - half, LsValue::mkOnes(w)}})
+        {
+          if (std::optional<LsBounds> q = meetBounds(op.kind, *m, range))
+          {
+            parts.push_back(*q);
+          }
+        }
+      }
+      for (const LsBounds& part : parts)
+      {
+        DomainSampler sampler(x, part.lo, part.hi);
+        if (!sampler.empty())
+        {
+          res.samplers.push_back(sampler);
+        }
+      }
+      return res;
     }
     default: break;
   }
   Unreachable() << "no rules within bounds for " << op.kind;
+}
+
+/** Return true if v is the sign extension of a k-bit value, 0 < k < w. */
+bool isSignExtensionOf(const LsValue& v, uint32_t k)
+{
+  uint32_t w = v.getSize();
+  LsValue top = v.logicalRightShift(k - 1);
+  return isZero(top) || top == LsValue::mkOnes(w).logicalRightShift(k - 1);
+}
+
+/** Return true if v lies within b, in the order of kind k. */
+bool isWithin(LsKind k, const LsValue& v, const LsBounds& b)
+{
+  if (k == LsKind::SLT)
+  {
+    return isWithin(LsKind::ULT, flipMsb(v), {flipMsb(b.lo), flipMsb(b.hi)});
+  }
+  return b.lo.unsignedLessThanEq(v) && v.unsignedLessThanEq(b.hi);
 }
 
 }  // namespace
@@ -2527,9 +2598,11 @@ bool isInvertibleWithin(const OpInfo& op,
                         const LsValue& t,
                         const LsChildren& ch,
                         const TernaryDomain& x,
-                        const LsBounds& b)
+                        const LsBounds& b,
+                        uint32_t sextFrom)
 {
-  return inverseSamplerWithin(op, posX, t, ch, x, b).has_value();
+  return !inverseSamplersWithin(op, posX, t, ch, x, b, sextFrom)
+              .samplers.empty();
 }
 
 LsValue inverseValueWithin(const OpInfo& op,
@@ -2538,18 +2611,25 @@ LsValue inverseValueWithin(const OpInfo& op,
                            const LsChildren& ch,
                            const TernaryDomain& x,
                            const LsBounds& b,
-                           LsRng& rng)
+                           LsRng& rng,
+                           uint32_t sextFrom)
 {
-  std::optional<InverseSampler> sampler =
-      inverseSamplerWithin(op, posX, t, ch, x, b);
-  Assert(sampler);
-  LsValue v = sampler->sampler.random(rng);
-  if (sampler->flip)
+  InverseSamplers s = inverseSamplersWithin(op, posX, t, ch, x, b, sextFrom);
+  Assert(!s.samplers.empty());
+  // Each range with a value has a non-zero probability, and so has each value
+  // in it.
+  const DomainSampler& sampler =
+      s.samplers.size() == 1 ? s.samplers[0]
+                             : s.samplers[rng.pickIndex(s.samplers.size())];
+  LsValue v = sampler.random(rng);
+  if (s.flip)
   {
     v = flipMsb(v);
   }
 #ifdef CVC5_ASSERTIONS
   Assert(x.matches(v));
+  Assert(isWithin(boundsKind(op.kind), v, b));
+  Assert(sextFrom == 0 || isSignExtensionOf(v, sextFrom));
   LsChildren chx = ch;
   chx[posX] = &v;
   Assert(evaluate(op, chx) == t)

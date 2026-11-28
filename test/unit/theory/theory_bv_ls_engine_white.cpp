@@ -717,6 +717,7 @@ TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds_random)
     c1.constBits = true;
     LsConfig c2 = c1;
     c2.ineqBounds = true;
+    c2.sextRanges = true;
     LsEngine e1(seed, c1);
     LsEngine e2(seed, c2);
     LsRng r1(seed);
@@ -727,7 +728,7 @@ TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds_random)
     LsResult res1 = e1.solve(2000, 0);
     LsResult res2 = e2.solve(2000, 0);
     ASSERT_TRUE(e2.checkInvariants());
-    if (e2.stats().propsWithBounds == 0)
+    if (e2.stats().propsWithBounds == 0 && e2.stats().propsWithSext == 0)
     {
       ++without;
       ASSERT_EQ(res1, res2) << "seed " << seed;
@@ -742,6 +743,52 @@ TEST_F(TestTheoryWhiteBvLsEngine, ineq_bounds_random)
   }
   ASSERT_GT(withBounds, 0u);
   ASSERT_GT(without, 0u);
+}
+
+/**
+ * prop-cb+ (Step 9): sextWidth recognizes a SEXT and the encoding of the
+ * adapter, and with sextRanges an inequality over a sign extension
+ * propagates a sign extension, so the native SEXT below has no conflict.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, sext_ranges)
+{
+  for (bool native : {true, false})
+  {
+    for (uint64_t seed = 1; seed <= 20; ++seed)
+    {
+      LsConfig config;
+      config.probInverse = 1000;
+      config.constBits = true;
+      config.sextRanges = true;
+      LsEngine e(seed, config);
+      uint32_t a = mkVar(e, 8);
+      uint32_t sx;
+      if (native)
+      {
+        sx = e.mkOp(LsKind::SEXT, {a}, 24);
+      }
+      else
+      {
+        uint32_t sign = e.mkOp(LsKind::EXTRACT, {a}, 7, 7);
+        uint32_t ext =
+            e.mkOp(LsKind::ITE,
+                   {sign, mkConst(e, 24, (1u << 24) - 1), mkConst(e, 24, 0)});
+        sx = e.mkOp(LsKind::CONCAT, {ext, a});
+      }
+      ASSERT_EQ(e.sextWidth(sx), 8u);
+      ASSERT_EQ(e.sextWidth(a), 0u);
+      // sx >=u 5 (false for a = 0) and sx <u ffffff00.
+      e.setRoots(
+          {e.mkOp(LsKind::NOT, {e.mkOp(LsKind::ULT, {sx, mkConst(e, 32, 5)})}),
+           e.mkOp(LsKind::ULT, {sx, mkConst(e, 32, 0xffffff00u)})});
+      ASSERT_EQ(e.solve(0, 0), LsResult::SAT) << "seed " << seed;
+      ASSERT_GT(e.stats().propsSextRange, 0u);
+      if (native)
+      {
+        ASSERT_EQ(e.stats().conflicts, 0u) << "seed " << seed;
+      }
+    }
+  }
 }
 
 }  // namespace test

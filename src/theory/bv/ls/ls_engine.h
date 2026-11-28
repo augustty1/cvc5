@@ -73,6 +73,14 @@ struct LsStats
   uint64_t propsWithBounds = 0;
   uint64_t propsBounded = 0;
   uint64_t boundsFallback = 0;
+  /**
+   * prop-cb+: inverse steps over a sign extension with sextRanges, and the
+   * ones whose value was drawn among the sign extensions. A run without any
+   * step with bounds or over a sign extension draws the same random numbers
+   * as without these options.
+   */
+  uint64_t propsWithSext = 0;
+  uint64_t propsSextRange = 0;
 };
 
 /**
@@ -114,6 +122,12 @@ struct LsConfig
    * V-A). Only with constBits.
    */
   bool ineqBounds = false;
+  /**
+   * Draw the inverse values of an inequality whose operand is a sign
+   * extension among the sign extensions (the ranges (3) and (4) of FMCAD'20
+   * Sec. V-A). Only with constBits.
+   */
+  bool sextRanges = false;
 };
 
 /**
@@ -223,6 +237,13 @@ class LsEngine
    * the bounds. Requires the prepared roots; nothing without ineqBounds.
    */
   std::optional<LsBounds> ineqBounds(uint32_t id, LsKind k) const;
+
+  /**
+   * Return k if node id is the sign extension of a k-bit node: a SEXT, or
+   * the encoding of the adapter, concat(ite(y[k-1], ones, 0), y). Return 0
+   * otherwise.
+   */
+  uint32_t sextWidth(uint32_t id) const;
 
   const LsStats& stats() const { return d_stats; }
 

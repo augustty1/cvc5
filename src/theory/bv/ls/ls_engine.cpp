@@ -343,6 +343,40 @@ std::optional<LsBounds> LsEngine::ineqBounds(uint32_t id, LsKind k) const
   return res;
 }
 
+uint32_t LsEngine::sextWidth(uint32_t id) const
+{
+  const Node& n = d_nodes[id];
+  if (n.op.kind == LsKind::SEXT)
+  {
+    return d_nodes[n.children[0]].value.getSize();
+  }
+  if (n.op.kind != LsKind::CONCAT)
+  {
+    return 0;
+  }
+  const Node& e = d_nodes[n.children[0]];
+  uint32_t y = n.children[1];
+  uint32_t k = d_nodes[y].value.getSize();
+  if (e.op.kind != LsKind::ITE)
+  {
+    return 0;
+  }
+  // The condition is y[k-1], which is y itself for k = 1.
+  uint32_t c = e.children[0];
+  const Node& cn = d_nodes[c];
+  bool isSign = (k == 1 && c == y)
+                || (cn.op.kind == LsKind::EXTRACT && cn.children[0] == y
+                    && cn.op.hi == k - 1 && cn.op.lo == k - 1);
+  const Node& a = d_nodes[e.children[1]];
+  const Node& b = d_nodes[e.children[2]];
+  if (!isSign || !a.isConst || !b.isConst || !isOnes(a.value)
+      || !isZero(b.value))
+  {
+    return 0;
+  }
+  return k;
+}
+
 std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
 {
   LsValue t = LsValue::mkOne(1);
@@ -381,34 +415,66 @@ std::optional<std::pair<uint32_t, LsValue>> LsEngine::selectMove(uint32_t r)
       // probability of the inverse branch, so that every inverse value keeps
       // a non-zero probability (D38).
       std::optional<LsBounds> bounds;
-      if (tryInverse && d_config.ineqBounds && usesBounds(n.op.kind))
+      uint32_t sextFrom = 0;
+      if (tryInverse && isIneqKind(n.op.kind))
       {
-        bounds = ineqBounds(n.children[i], boundsKind(n.op.kind));
-        if (bounds)
+        if (d_config.ineqBounds)
         {
-          ++d_stats.propsWithBounds;
-          if (onlyOne && !d_rng.pickWithProb(d_config.probInverse))
+          bounds = ineqBounds(n.children[i], boundsKind(n.op.kind));
+          if (bounds)
           {
-            bounds.reset();
+            ++d_stats.propsWithBounds;
           }
+        }
+        if (d_config.sextRanges)
+        {
+          sextFrom = sextWidth(n.children[i]);
+          if (sextFrom > 0)
+          {
+            ++d_stats.propsWithSext;
+          }
+        }
+        if ((bounds || sextFrom > 0) && onlyOne
+            && !d_rng.pickWithProb(d_config.probInverse))
+        {
+          bounds.reset();
+          sextFrom = 0;
         }
       }
       bool bounded = false;
-      if (bounds)
+      if (bounds || sextFrom > 0)
       {
-        if (isInvertibleWithin(n.op, i, t, ch, x, *bounds))
+        LsBounds b =
+            bounds ? *bounds : fullBounds(boundsKind(n.op.kind), x.getSize());
+        if (sextFrom > 0 && isInvertibleWithin(n.op, i, t, ch, x, b, sextFrom))
         {
-          t = inverseValueWithin(n.op, i, t, ch, x, *bounds, d_rng);
-          ++d_stats.propsInv;
-          ++d_stats.propsBounded;
+          // FMCAD'20 ranges (3) and (4): an inverse value that the sign
+          // extension below can take.
+          t = inverseValueWithin(n.op, i, t, ch, x, b, d_rng, sextFrom);
+          ++d_stats.propsSextRange;
           bounded = true;
         }
-        else
+        else if (bounds && isInvertibleWithin(n.op, i, t, ch, x, *bounds))
+        {
+          t = inverseValueWithin(n.op, i, t, ch, x, *bounds, d_rng);
+          bounded = true;
+        }
+        else if (bounds)
         {
           // FMCAD'20: bounds that leave no inverse value fall back to a
           // consistent value without bounds.
           ++d_stats.boundsFallback;
           tryInverse = false;
+        }
+        // Ranges of a sign extension without a value do not apply: the
+        // ordinary inverse value follows.
+        if (bounded)
+        {
+          ++d_stats.propsInv;
+          if (bounds)
+          {
+            ++d_stats.propsBounded;
+          }
         }
       }
       if (bounded)
