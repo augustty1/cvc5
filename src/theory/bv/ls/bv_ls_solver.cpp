@@ -40,6 +40,7 @@ BvLsSolver::BvLsSolver(Env& env)
     : EnvObj(env),
       d_engine(options().driver.seed, mkConfig(options())),
       d_nativeOps(options().bv.bvLsConstBits && options().bv.bvLsNativeOps),
+      d_nativeSlt(options().bv.bvLsConstBits && options().bv.bvLsNativeSlt),
       d_numChecks(
           statisticsRegistry().registerInt("theory::bv::ls::numChecks")),
       d_numSat(statisticsRegistry().registerInt("theory::bv::ls::numSat")),
@@ -577,6 +578,10 @@ uint32_t BvLsSolver::mkConst(uint32_t w, const Integer& v)
 
 uint32_t BvLsSolver::mkSlt(uint32_t a, uint32_t b, uint32_t w)
 {
+  if (d_nativeSlt)
+  {
+    return d_engine.mkOp(LsKind::SLT, {a, b});
+  }
   if (w == 1)
   {
     // a <s b iff a = 1 (-1) and b = 0.

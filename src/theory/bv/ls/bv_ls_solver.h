@@ -118,6 +118,8 @@ class BvLsSolver : protected EnvObj
    * otherwise they are encoded with the base operators.
    */
   bool d_nativeOps;
+  /** Whether signed inequalities are the native SLT (prop-cb+). */
+  bool d_nativeSlt;
   /** The engine node of each translated term. */
   std::unordered_map<Node, uint32_t> d_nodeMap;
   /** Constant leaves by (width, value), so equal constants share a node. */

@@ -68,6 +68,11 @@ class TestTheoryWhiteBvLsOps : public TestInternal
       case LsKind::SHL: return b >= w ? 0 : (a << b) & mask;
       case LsKind::LSHR: return b >= w ? 0 : a >> b;
       case LsKind::XOR: return a ^ b;
+      case LsKind::SLT:
+      {
+        uint32_t m = 1u << (w - 1);
+        return (a ^ m) < (b ^ m);
+      }
       case LsKind::ASHR:
       {
         uint32_t sign = (a >> (w - 1)) != 0 ? mask : 0;
@@ -306,7 +311,8 @@ class TestTheoryWhiteBvLsOps : public TestInternal
                      LsKind::LSHR,
                      LsKind::CONCAT,
                      LsKind::XOR,
-                     LsKind::ASHR})
+                     LsKind::ASHR,
+                     LsKind::SLT})
     {
       res.push_back({{k}, {w, w}});
     }
@@ -730,6 +736,18 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_ult)
     for (uint32_t pos = 0; pos <= 1; ++pos)
     {
       ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::ULT}, pos, {w, w}));
+    }
+  }
+}
+
+/** The base rules of SLT (prop-cb+), against brute force. */
+TEST_F(TestTheoryWhiteBvLsOps, rules_slt)
+{
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    for (uint32_t pos = 0; pos <= 1; ++pos)
+    {
+      ASSERT_NO_FATAL_FAILURE(checkRules({LsKind::SLT}, pos, {w, w}));
     }
   }
 }
@@ -1191,7 +1209,7 @@ TEST_F(TestTheoryWhiteBvLsOps, domain_rules_ult_shifts)
   for (uint32_t w = 1; w <= 4; ++w)
   {
     bool sampled = w == 4;
-    for (LsKind k : {LsKind::ULT, LsKind::SHL, LsKind::LSHR})
+    for (LsKind k : {LsKind::ULT, LsKind::SLT, LsKind::SHL, LsKind::LSHR})
     {
       for (uint32_t pos = 0; pos < 2; ++pos)
       {
@@ -2331,6 +2349,139 @@ TEST_F(TestTheoryWhiteBvLsOps, rules_ult_within_bounds)
                   ASSERT_TRUE(std::all_of(
                       seen.begin(), seen.end(), [](bool b) { return b; }));
                 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * prop-cb+ (Step 8): the solutions of x <s s and s <s x form the signed
+ * interval that ineqSolutions returns, meetBounds is the signed
+ * intersection, and the SLT rules within signed bounds are exact and
+ * complete, against brute force.
+ */
+TEST_F(TestTheoryWhiteBvLsOps, slt_bounds)
+{
+  OpInfo op{LsKind::SLT};
+  LsRng rng(13);
+  for (uint32_t w = 1; w <= 4; ++w)
+  {
+    uint32_t n = 1u << w;
+    uint32_t m = 1u << (w - 1);
+    // f maps the signed order to the unsigned one.
+    auto f = [m](uint32_t v) { return v ^ m; };
+    for (uint32_t s = 0; s < n; ++s)
+    {
+      for (uint32_t pos = 0; pos < 2; ++pos)
+      {
+        for (bool holds : {false, true})
+        {
+          std::optional<LsBounds> b =
+              ineqSolutions(LsKind::SLT, pos, holds, LsValue(w, s));
+          for (uint32_t v = 0; v < n; ++v)
+          {
+            bool sol = (pos == 0 ? f(v) < f(s) : f(s) < f(v)) == holds;
+            bool in = false;
+            if (b)
+            {
+              uint32_t lo = 0, hi = 0;
+              for (uint32_t u = 0; u < n; ++u)
+              {
+                if (LsValue(w, u) == b->lo) lo = u;
+                if (LsValue(w, u) == b->hi) hi = u;
+              }
+              in = f(lo) <= f(v) && f(v) <= f(hi);
+            }
+            ASSERT_EQ(sol, in) << "w=" << w << " s=" << s << " pos=" << pos
+                               << " holds=" << holds << " v=" << v;
+          }
+        }
+      }
+    }
+    // Signed intervals [lo, hi]: f(lo) <= f(hi).
+    std::vector<std::pair<uint32_t, uint32_t>> ivs;
+    for (uint32_t a = 0; a < n; ++a)
+    {
+      for (uint32_t b = a; b < n; ++b)
+      {
+        ivs.emplace_back(f(a), f(b));
+      }
+    }
+    for (const auto& [a, b] : ivs)
+    {
+      ASSERT_EQ(isFullBounds(LsKind::SLT, {LsValue(w, a), LsValue(w, b)}),
+                f(a) == 0 && f(b) == n - 1);
+      for (const auto& [c, d] : ivs)
+      {
+        std::optional<LsBounds> mt = meetBounds(LsKind::SLT,
+                                                {LsValue(w, a), LsValue(w, b)},
+                                                {LsValue(w, c), LsValue(w, d)});
+        uint32_t lo = std::max(f(a), f(c));
+        uint32_t hi = std::min(f(b), f(d));
+        ASSERT_EQ(mt.has_value(), lo <= hi);
+        if (mt)
+        {
+          ASSERT_EQ(mt->lo, LsValue(w, f(lo)));
+          ASSERT_EQ(mt->hi, LsValue(w, f(hi)));
+        }
+      }
+    }
+    // The rules within bounds.
+    bool sampled = w == 4;
+    std::vector<TernaryDomain> doms = allDomains(w);
+    for (size_t di = 0; di < doms.size(); di += sampled ? 4 : 1)
+    {
+      const TernaryDomain& x = doms[di];
+      LsValue cur = x.lo();
+      for (uint32_t s = 0; s < n; ++s)
+      {
+        LsValue sv(w, s);
+        for (uint32_t pos = 0; pos < 2; ++pos)
+        {
+          LsChildren ch;
+          ch.push_back(pos == 0 ? &cur : &sv);
+          ch.push_back(pos == 0 ? &sv : &cur);
+          for (uint32_t tv = 0; tv < 2; ++tv)
+          {
+            LsValue t(1, tv);
+            for (size_t k = 0; k < ivs.size(); k += sampled ? 5 : 1)
+            {
+              auto [lo, hi] = ivs[k];
+              LsBounds b{LsValue(w, lo), LsValue(w, hi)};
+              std::vector<LsValue> sols;
+              for (uint32_t v = 0; v < n; ++v)
+              {
+                bool lt = pos == 0 ? f(v) < f(s) : f(s) < f(v);
+                if (x.matches(LsValue(w, v)) && lt == (tv == 1) && f(lo) <= f(v)
+                    && f(v) <= f(hi))
+                {
+                  sols.emplace_back(w, v);
+                }
+              }
+              ASSERT_EQ(isInvertibleWithin(op, pos, t, ch, x, b), !sols.empty())
+                  << "w=" << w << " x=" << x << " s=" << s << " pos=" << pos
+                  << " t=" << tv << " [" << lo << ", " << hi << "]";
+              if (sols.empty())
+              {
+                continue;
+              }
+              std::vector<bool> seen(sols.size(), false);
+              uint32_t draws = sampled ? 16 : 40 * sols.size();
+              for (uint32_t d = 0; d < draws; ++d)
+              {
+                LsValue v = inverseValueWithin(op, pos, t, ch, x, b, rng);
+                auto it = std::find(sols.begin(), sols.end(), v);
+                ASSERT_TRUE(it != sols.end()) << "drawn " << v;
+                seen[it - sols.begin()] = true;
+              }
+              if (!sampled)
+              {
+                ASSERT_TRUE(std::all_of(
+                    seen.begin(), seen.end(), [](bool c) { return c; }));
               }
             }
           }

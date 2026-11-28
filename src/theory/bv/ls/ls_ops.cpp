@@ -44,6 +44,7 @@ const char* toString(LsKind k)
     case LsKind::XOR: return "XOR";
     case LsKind::SEXT: return "SEXT";
     case LsKind::ASHR: return "ASHR";
+    case LsKind::SLT: return "SLT";
   }
   Unreachable();
 }
@@ -73,7 +74,8 @@ uint32_t arity(LsKind k)
     case LsKind::LSHR:
     case LsKind::CONCAT:
     case LsKind::XOR:
-    case LsKind::ASHR: return 2;
+    case LsKind::ASHR:
+    case LsKind::SLT: return 2;
     case LsKind::ITE: return 3;
   }
   Unreachable();
@@ -83,6 +85,55 @@ namespace {
 
 /** Return the width-1 value of b. */
 LsValue mkBool(bool b) { return LsValue(1, b ? 1 : 0); }
+
+/*
+ * SLT (prop-cb+): x <s y iff f(x) <u f(y), with f the flip of the most
+ * significant bit. f is a bijection on the values of a width, and a value v
+ * matches a domain x iff f(v) matches flipMsbD(x), so the rules of SLT are
+ * the rules of ULT on the flipped values and domains, with the values they
+ * return flipped back (plan D39).
+ */
+
+/** Return v with its most significant bit flipped. */
+LsValue flipMsb(const LsValue& v)
+{
+  return v ^ LsValue::mkMinSigned(v.getSize());
+}
+
+/** Return the domain of the values f(v) for v matching x. */
+TernaryDomain flipMsbD(const TernaryDomain& x)
+{
+  uint32_t w = x.getSize();
+  if (!x.isFixedBit(w - 1))
+  {
+    return x;
+  }
+  LsValue m = LsValue::mkMinSigned(w);
+  return TernaryDomain(x.lo() ^ m, x.hi() ^ m);
+}
+
+/** The children of an SLT with their most significant bits flipped. */
+class FlippedChildren
+{
+ public:
+  explicit FlippedChildren(const LsChildren& ch)
+      : d_a(flipMsb(*ch[0])), d_b(flipMsb(*ch[1]))
+  {
+    d_ch.push_back(&d_a);
+    d_ch.push_back(&d_b);
+  }
+  FlippedChildren(const FlippedChildren&) = delete;
+  FlippedChildren& operator=(const FlippedChildren&) = delete;
+  const LsChildren& get() const { return d_ch; }
+
+ private:
+  LsValue d_a;
+  LsValue d_b;
+  LsChildren d_ch;
+};
+
+/** The operator whose rules SLT uses. */
+const OpInfo kUltOp{LsKind::ULT};
 
 /**
  * Return x shifted right arithmetically by k bits: the bits shifted in are
@@ -173,6 +224,8 @@ LsValue evaluate(const OpInfo& op, const LsChildren& ch)
     case LsKind::AND: return *ch[0] & *ch[1];
     case LsKind::EQ: return mkBool(*ch[0] == *ch[1]);
     case LsKind::ULT: return mkBool(ch[0]->unsignedLessThan(*ch[1]));
+    case LsKind::SLT:
+      return mkBool(flipMsb(*ch[0]).unsignedLessThan(flipMsb(*ch[1])));
     case LsKind::ADD: return *ch[0] + *ch[1];
     case LsKind::MUL: return *ch[0] * *ch[1];
     case LsKind::UDIV: return ch[0]->unsignedDivTotal(*ch[1]);
@@ -708,7 +761,8 @@ LsValue computeInverse(const OpInfo& op,
       return invShift(1, tl, chl, false, rng);
     }
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "inverseValue called on leaf kind " << op.kind;
 }
@@ -720,6 +774,11 @@ bool isInvertible(const OpInfo& op,
                   const LsValue& t,
                   const LsChildren& ch)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    FlippedChildren f(ch);
+    return isInvertible(kUltOp, posX, t, f.get());
+  }
   Assert(ch.size() == arity(op.kind));
   Assert(posX < ch.size());
   switch (op.kind)
@@ -778,7 +837,8 @@ bool isInvertible(const OpInfo& op,
     case LsKind::UDIV: return icUdiv(posX, *ch[1 - posX], t);
     case LsKind::UREM: return icUrem(posX, *ch[1 - posX], t);
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "isInvertible called on leaf kind " << op.kind;
 }
@@ -806,6 +866,11 @@ LsValue inverseValue(const OpInfo& op,
                      const LsChildren& ch,
                      LsRng& rng)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    FlippedChildren f(ch);
+    return flipMsb(inverseValue(kUltOp, posX, t, f.get(), rng));
+  }
   Assert(isInvertible(op, posX, t, ch));
   LsValue x = computeInverse(op, posX, t, ch, rng);
 #ifdef CVC5_ASSERTIONS
@@ -823,6 +888,11 @@ LsValue consistentValue(const OpInfo& op,
                         const LsChildren& ch,
                         LsRng& rng)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    FlippedChildren f(ch);
+    return flipMsb(consistentValue(kUltOp, posX, t, f.get(), rng));
+  }
   Assert(ch.size() == arity(op.kind));
   Assert(posX < ch.size());
   uint32_t w = ch[posX]->getSize();
@@ -850,7 +920,8 @@ LsValue consistentValue(const OpInfo& op,
     case LsKind::UDIV: return consUdiv(posX, t, rng);
     case LsKind::UREM: return consUrem(posX, t, rng);
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "consistentValue called on leaf kind " << op.kind;
 }
@@ -1409,7 +1480,8 @@ bool icFixedBits(const OpInfo& op,
       return forEachFoundDivisor(x, n, t, [](const LsValue&) { return true; });
     }
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "isInvertible called on leaf kind " << op.kind;
 }
@@ -1664,7 +1736,8 @@ LsValue inverseFixedBits(const OpInfo& op,
       return res;
     }
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "inverseValue called on leaf kind " << op.kind;
 }
@@ -1907,7 +1980,8 @@ std::optional<LsValue> consistentFixedBits(const OpInfo& op,
       return pick(x, inc(t), LsValue::mkOnes(w), rng);
     }
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "tryConsistentValue called on leaf kind " << op.kind;
 }
@@ -1920,6 +1994,11 @@ bool isInvertible(const OpInfo& op,
                   const LsChildren& ch,
                   const TernaryDomain& x)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    FlippedChildren f(ch);
+    return isInvertible(kUltOp, posX, t, f.get(), flipMsbD(x));
+  }
   Assert(x.getSize() == ch[posX]->getSize());
   // Every condition modulo constant bits includes the base condition.
   if (!isInvertible(op, posX, t, ch))
@@ -1955,6 +2034,11 @@ LsValue inverseValue(const OpInfo& op,
                      const TernaryDomain& x,
                      LsRng& rng)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    FlippedChildren f(ch);
+    return flipMsb(inverseValue(kUltOp, posX, t, f.get(), flipMsbD(x), rng));
+  }
   if (!x.hasFixedBits())
   {
     return inverseValue(op, posX, t, ch, rng);
@@ -1981,6 +2065,17 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
                                           const TernaryDomain& x,
                                           LsRng& rng)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    FlippedChildren f(ch);
+    std::optional<LsValue> v =
+        tryConsistentValue(kUltOp, posX, t, f.get(), flipMsbD(x), rng);
+    if (v)
+    {
+      return flipMsb(*v);
+    }
+    return v;
+  }
   Assert(ch.size() == arity(op.kind));
   Assert(posX < ch.size());
   Assert(x.getSize() == ch[posX]->getSize());
@@ -2192,6 +2287,12 @@ TernaryDomain shiftD(const TernaryDomain& x,
 
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
 {
+  if (op.kind == LsKind::SLT)
+  {
+    TernaryDomain a = flipMsbD(*doms[0]);
+    TernaryDomain b = flipMsbD(*doms[1]);
+    return forwardDomain(kUltOp, {&a, &b});
+  }
   Assert(doms.size() == arity(op.kind));
   // If every child has a single value, so does the operator.
   bool allFixed = true;
@@ -2258,12 +2359,13 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms)
     case LsKind::UDIV: return udivD(x, *doms[1]);
     case LsKind::UREM: return uremD(x, *doms[1]);
     case LsKind::CONST:
-    case LsKind::VAR: break;
+    case LsKind::VAR:
+    case LsKind::SLT: break;
   }
   Unreachable() << "forwardDomain called on leaf kind " << op.kind;
 }
 
-bool isIneqKind(LsKind k) { return k == LsKind::ULT; }
+bool isIneqKind(LsKind k) { return k == LsKind::ULT || k == LsKind::SLT; }
 
 std::optional<LsBounds> ineqSolutions(LsKind k,
                                       uint32_t posX,
@@ -2272,6 +2374,16 @@ std::optional<LsBounds> ineqSolutions(LsKind k,
 {
   Assert(isIneqKind(k));
   Assert(posX < 2);
+  if (k == LsKind::SLT)
+  {
+    std::optional<LsBounds> b =
+        ineqSolutions(LsKind::ULT, posX, holds, flipMsb(s));
+    if (b)
+    {
+      return LsBounds{flipMsb(b->lo), flipMsb(b->hi)};
+    }
+    return b;
+  }
   uint32_t w = s.getSize();
   LsValue zero = LsValue::mkZero(w);
   LsValue ones = LsValue::mkOnes(w);
@@ -2300,6 +2412,17 @@ std::optional<LsBounds> meetBounds(LsKind k,
 {
   Assert(isIneqKind(k));
   Assert(a.lo.getSize() == b.lo.getSize());
+  if (k == LsKind::SLT)
+  {
+    std::optional<LsBounds> m = meetBounds(LsKind::ULT,
+                                           {flipMsb(a.lo), flipMsb(a.hi)},
+                                           {flipMsb(b.lo), flipMsb(b.hi)});
+    if (m)
+    {
+      return LsBounds{flipMsb(m->lo), flipMsb(m->hi)};
+    }
+    return m;
+  }
   const LsValue& lo = a.lo.unsignedLessThan(b.lo) ? b.lo : a.lo;
   const LsValue& hi = a.hi.unsignedLessThan(b.hi) ? a.hi : b.hi;
   if (hi.unsignedLessThan(lo))
@@ -2312,10 +2435,14 @@ std::optional<LsBounds> meetBounds(LsKind k,
 bool isFullBounds(LsKind k, const LsBounds& b)
 {
   Assert(isIneqKind(k));
+  if (k == LsKind::SLT)
+  {
+    return isZero(flipMsb(b.lo)) && isOnes(flipMsb(b.hi));
+  }
   return isZero(b.lo) && isOnes(b.hi);
 }
 
-bool usesBounds(LsKind k) { return k == LsKind::ULT; }
+bool usesBounds(LsKind k) { return isIneqKind(k); }
 
 LsKind boundsKind(LsKind k)
 {
@@ -2326,20 +2453,46 @@ LsKind boundsKind(LsKind k)
 namespace {
 
 /**
+ * A sampler of inverse values, and whether the values it draws are to be
+ * flipped back (SLT).
+ */
+struct InverseSampler
+{
+  DomainSampler sampler;
+  bool flip;
+};
+
+/**
  * Return a sampler of the inverse values of child posX that match x and lie
  * within b, or nothing if there is none.
  */
-std::optional<DomainSampler> inverseSamplerWithin(const OpInfo& op,
-                                                  uint32_t posX,
-                                                  const LsValue& t,
-                                                  const LsChildren& ch,
-                                                  const TernaryDomain& x,
-                                                  const LsBounds& b)
+std::optional<InverseSampler> inverseSamplerWithin(const OpInfo& op,
+                                                   uint32_t posX,
+                                                   const LsValue& t,
+                                                   const LsChildren& ch,
+                                                   const TernaryDomain& x,
+                                                   const LsBounds& b)
 {
   Assert(usesBounds(op.kind));
   Assert(b.lo.getSize() == x.getSize());
   switch (op.kind)
   {
+    case LsKind::SLT:
+    {
+      FlippedChildren f(ch);
+      std::optional<InverseSampler> res =
+          inverseSamplerWithin(kUltOp,
+                               posX,
+                               t,
+                               f.get(),
+                               flipMsbD(x),
+                               {flipMsb(b.lo), flipMsb(b.hi)});
+      if (res)
+      {
+        res->flip = true;
+      }
+      return res;
+    }
     case LsKind::ULT:
     {
       // The inverse values of an inequality are its solutions for t, an
@@ -2360,7 +2513,7 @@ std::optional<DomainSampler> inverseSamplerWithin(const OpInfo& op,
       {
         return std::nullopt;
       }
-      return sampler;
+      return InverseSampler{sampler, false};
     }
     default: break;
   }
@@ -2387,10 +2540,14 @@ LsValue inverseValueWithin(const OpInfo& op,
                            const LsBounds& b,
                            LsRng& rng)
 {
-  std::optional<DomainSampler> sampler =
+  std::optional<InverseSampler> sampler =
       inverseSamplerWithin(op, posX, t, ch, x, b);
   Assert(sampler);
-  LsValue v = sampler->random(rng);
+  LsValue v = sampler->sampler.random(rng);
+  if (sampler->flip)
+  {
+    v = flipMsb(v);
+  }
 #ifdef CVC5_ASSERTIONS
   Assert(x.matches(v));
   LsChildren chx = ch;

@@ -39,8 +39,10 @@ namespace ls {
  * instead restricts w to 2^q with a q-bit shift amount).
  *
  * The kinds after ITE are the operators that prop-c+ handles natively
- * (FMCAD'20 Sec. V); without them the adapter encodes them with the base
- * operators.
+ * (FMCAD'20 Sec. V), and SLT, the native <s of prop-cb+; without them the
+ * adapter encodes them with the base operators. The rules of SLT are those
+ * of ULT on the values and domains with the most significant bit flipped,
+ * which maps the signed order to the unsigned one (plan D39).
  */
 enum class LsKind
 {
@@ -62,10 +64,11 @@ enum class LsKind
   XOR,      // x ^ y
   SEXT,     // x sign-extended by n bits (n = OpInfo::hi)
   ASHR,     // x >> y (arithmetic)
+  SLT,      // x <s y, width 1
 };
 
 /** The number of kinds. */
-constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::ASHR) + 1;
+constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::SLT) + 1;
 
 const char* toString(LsKind k);
 std::ostream& operator<<(std::ostream& os, LsKind k);
@@ -287,7 +290,7 @@ TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 
 /**
  * An interval [lo, hi] of values of one width, with lo <= hi in the order of
- * the inequality kind it belongs to (unsigned for ULT).
+ * the inequality kind it belongs to: unsigned for ULT, signed for SLT.
  */
 struct LsBounds
 {
@@ -318,8 +321,8 @@ bool isFullBounds(LsKind k, const LsBounds& b);
 
 /**
  * Return true if the inverse values of the children of an operator of kind k
- * can be drawn within bounds (prop-cb+): for the inequalities, as in FMCAD'20
- * Sec. V-A.
+ * can be drawn within bounds (prop-cb+): for the inequalities ULT and SLT,
+ * as in FMCAD'20 Sec. V-A.
  */
 bool usesBounds(LsKind k);
 

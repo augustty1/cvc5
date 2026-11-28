@@ -470,5 +470,87 @@ TEST_F(TestTheoryWhiteBvLsSolverNativeOps, check_and_model)
   ASSERT_TRUE(yv < BitVector(8, 0x60u));
 }
 
+/** The solver with the native SLT and the bounds of prop-cb+. */
+class TestTheoryWhiteBvLsSolverNativeSlt : public TestSmtNoFinishInit
+{
+ protected:
+  void SetUp() override
+  {
+    TestSmtNoFinishInit::SetUp();
+    d_slvEngine->setOption("bv-ls-const-bits", "true");
+    d_slvEngine->setOption("bv-ls-native-slt", "true");
+    d_slvEngine->setOption("bv-ls-ineq-bounds", "true");
+    d_slvEngine->finishInit();
+  }
+};
+
+/**
+ * bvslt is one native SLT node, the other signed comparisons are SLT and
+ * NOT, and constant comparisons fold to the rewriter's value.
+ */
+TEST_F(TestTheoryWhiteBvLsSolverNativeSlt, native_nodes)
+{
+  Env& env = d_slvEngine->getEnv();
+  BvLsSolver ls(env);
+  NodeManager* nm = d_nodeManager.get();
+  TypeNode bv8 = nm->mkBitVectorType(8);
+  Node x = nm->mkVar("x", bv8);
+  Node y = nm->mkVar("y", bv8);
+  uint32_t before = ls.d_engine.numNodes();
+  ASSERT_TRUE(ls.translate(nm->mkNode(Kind::BITVECTOR_SLT, x, y)));
+  ASSERT_EQ(ls.d_engine.numNodes(), before + 3);  // x, y, x <s y
+  ASSERT_TRUE(ls.translate(nm->mkNode(Kind::BITVECTOR_SGE, x, y)));
+  ASSERT_EQ(ls.d_engine.numNodes(), before + 4);  // not (x <s y)
+  for (uint32_t a = 0; a < 256; a += 7)
+  {
+    for (uint32_t b = 0; b < 256; b += 11)
+    {
+      for (Kind k : {Kind::BITVECTOR_SLT,
+                     Kind::BITVECTOR_SLE,
+                     Kind::BITVECTOR_SGT,
+                     Kind::BITVECTOR_SGE})
+      {
+        Node t = nm->mkNode(
+            k, nm->mkConst(BitVector(8, a)), nm->mkConst(BitVector(8, b)));
+        std::optional<uint32_t> id = ls.translate(t);
+        ASSERT_TRUE(id.has_value()) << t;
+        ASSERT_TRUE(ls.d_engine.isConst(*id)) << t;
+        bool expected = env.getRewriter()->rewrite(t).getConst<bool>();
+        ASSERT_EQ(ls.d_engine.value(*id).isBitSet(0), expected) << t;
+      }
+    }
+  }
+}
+
+/**
+ * End to end with signed ranges: -16 <s x <s 16, y <s x, -4 <s y and
+ * x * 3 = y + 9; the search finds a model and it satisfies the facts.
+ */
+TEST_F(TestTheoryWhiteBvLsSolverNativeSlt, check_and_model)
+{
+  BvLsSolver ls(d_slvEngine->getEnv());
+  NodeManager* nm = d_nodeManager.get();
+  TypeNode bv8 = nm->mkBitVectorType(8);
+  Node x = nm->mkVar("x", bv8);
+  Node y = nm->mkVar("y", bv8);
+  auto c8 = [nm](uint32_t v) { return nm->mkConst(BitVector(8, v)); };
+  std::vector<Node> facts = {
+      nm->mkNode(Kind::BITVECTOR_SLT, c8(0xf0), x),
+      nm->mkNode(Kind::BITVECTOR_SLT, x, c8(0x10)),
+      nm->mkNode(Kind::BITVECTOR_SLT, y, x),
+      nm->mkNode(Kind::BITVECTOR_SLT, c8(0xfc), y),
+      nm->mkNode(Kind::EQUAL,
+                 nm->mkNode(Kind::BITVECTOR_MULT, x, c8(3)),
+                 nm->mkNode(Kind::BITVECTOR_ADD, y, c8(9)))};
+  ASSERT_EQ(ls.check(facts), prop::SAT_VALUE_TRUE);
+  BitVector xv = ls.getValue(x).getConst<BitVector>();
+  BitVector yv = ls.getValue(y).getConst<BitVector>();
+  ASSERT_TRUE(BitVector(8, 0xf0u).signedLessThan(xv));
+  ASSERT_TRUE(xv.signedLessThan(BitVector(8, 0x10u)));
+  ASSERT_TRUE(yv.signedLessThan(xv));
+  ASSERT_TRUE(BitVector(8, 0xfcu).signedLessThan(yv));
+  ASSERT_EQ(xv * BitVector(8, 3u), yv + BitVector(8, 9u));
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
