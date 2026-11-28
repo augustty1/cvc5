@@ -192,6 +192,18 @@ class LsEngine
   /** Return the number of roots that are currently false. */
   uint32_t numUnsatRoots() const { return d_unsatRoots.size(); }
 
+  /**
+   * Return true if node id is an inequality asserted by the prepared roots
+   * with the given polarity: an ULT that is a root (positive) or the child of
+   * a NOT root (negative). Only computed with ineqBounds (prop-cb+, FMCAD'20
+   * Sec. V-A); false otherwise.
+   */
+  bool isIneqRoot(uint32_t id, bool positive) const
+  {
+    return id < d_ineqRoot.size()
+           && (d_ineqRoot[id] & (positive ? kIneqPos : kIneqNeg)) != 0;
+  }
+
   const LsStats& stats() const { return d_stats; }
 
   /** Check the engine invariants after every move (expensive). */
@@ -260,6 +272,10 @@ class LsEngine
   std::vector<int64_t> d_unsatPos;
   /** Parents of each node reachable from the roots. */
   std::vector<std::vector<uint32_t>> d_parents;
+  /** The polarities with which each node is an asserted inequality. */
+  static constexpr uint8_t kIneqPos = 1;
+  static constexpr uint8_t kIneqNeg = 2;
+  std::vector<uint8_t> d_ineqRoot;
 
   /**
    * Scratch space of updateCone: the cone being collected, the nodes whose

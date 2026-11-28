@@ -20,6 +20,13 @@ namespace theory {
 namespace bv {
 namespace ls {
 
+namespace {
+
+/** Return true if k is an inequality whose operands can get bounds. */
+bool isIneqKind(LsKind k) { return k == LsKind::ULT; }
+
+}  // namespace
+
 LsEngine::LsEngine(uint64_t seed, LsConfig config)
     : d_config(config), d_rng(seed)
 {
@@ -191,6 +198,24 @@ void LsEngine::prepareRoots()
     {
       reached[r] = true;
       stack.push_back(r);
+    }
+  }
+  // The asserted inequalities, whose operands get bounds (prop-cb+).
+  d_ineqRoot.assign(d_config.ineqBounds ? size : 0, 0);
+  if (d_config.ineqBounds)
+  {
+    for (uint32_t r : d_roots)
+    {
+      const Node& n = d_nodes[r];
+      if (isIneqKind(n.op.kind))
+      {
+        d_ineqRoot[r] |= kIneqPos;
+      }
+      else if (n.op.kind == LsKind::NOT
+               && isIneqKind(d_nodes[n.children[0]].op.kind))
+      {
+        d_ineqRoot[n.children[0]] |= kIneqNeg;
+      }
     }
   }
   std::vector<uint32_t> reachable;

@@ -581,5 +581,38 @@ TEST_F(TestTheoryWhiteBvLsEngine, const_bits_random)
   ASSERT_GT(bitsFixed, 20u);
 }
 
+/**
+ * prop-cb+ (Step 2): the asserted inequalities are the ULT roots (positive)
+ * and the ULT children of NOT roots (negative), and only with ineqBounds.
+ */
+TEST_F(TestTheoryWhiteBvLsEngine, ineq_roots)
+{
+  for (bool on : {false, true})
+  {
+    LsConfig config;
+    config.constBits = true;
+    config.ineqBounds = on;
+    LsEngine e(1, config);
+    uint32_t x = mkVar(e, 8);
+    uint32_t y = mkVar(e, 8);
+    uint32_t lt100 = e.mkOp(LsKind::ULT, {x, mkConst(e, 8, 100)});
+    uint32_t lt50 = e.mkOp(LsKind::ULT, {x, mkConst(e, 8, 50)});
+    uint32_t ltxy = e.mkOp(LsKind::ULT, {x, y});
+    uint32_t eq = e.mkOp(LsKind::EQ, {x, y});
+    // ltxy is only below an AND, which is not an asserted inequality.
+    uint32_t conj = e.mkOp(LsKind::AND, {ltxy, eq});
+    e.setRoots({lt100, e.mkOp(LsKind::NOT, {lt50}), conj});
+    e.solve(1, 0);
+    ASSERT_EQ(e.isIneqRoot(lt100, true), on);
+    ASSERT_FALSE(e.isIneqRoot(lt100, false));
+    ASSERT_EQ(e.isIneqRoot(lt50, false), on);
+    ASSERT_FALSE(e.isIneqRoot(lt50, true));
+    ASSERT_FALSE(e.isIneqRoot(ltxy, true));
+    ASSERT_FALSE(e.isIneqRoot(ltxy, false));
+    ASSERT_FALSE(e.isIneqRoot(eq, true));
+    ASSERT_FALSE(e.isIneqRoot(conj, true));
+  }
+}
+
 }  // namespace test
 }  // namespace cvc5::internal
