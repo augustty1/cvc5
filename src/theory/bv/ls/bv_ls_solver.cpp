@@ -38,7 +38,6 @@ LsConfig mkConfig(const Options& opts)
 BvLsSolver::BvLsSolver(Env& env)
     : EnvObj(env),
       d_engine(options().driver.seed, mkConfig(options())),
-      d_nativeOps(options().bv.bvLsConstBits && options().bv.bvLsNativeOps),
       d_numChecks(
           statisticsRegistry().registerInt("theory::bv::ls::numChecks")),
       d_numSat(statisticsRegistry().registerInt("theory::bv::ls::numSat")),
@@ -436,10 +435,6 @@ std::optional<uint32_t> BvLsSolver::translateOne(TNode n)
     case Kind::BITVECTOR_LSHR: return d_engine.mkOp(LsKind::LSHR, ch);
     case Kind::BITVECTOR_ASHR:
     {
-      if (d_nativeOps)
-      {
-        return d_engine.mkOp(LsKind::ASHR, ch);
-      }
       // msb(a) ? ~(~a >> b) : a >> b
       uint32_t msb = mkExtract(ch[0], w - 1, w - 1);
       uint32_t neg = mkNot(d_engine.mkOp(LsKind::LSHR, {mkNot(ch[0]), ch[1]}));
@@ -469,10 +464,6 @@ std::optional<uint32_t> BvLsSolver::translateOne(TNode n)
       if (k == Kind::BITVECTOR_ZERO_EXTEND)
       {
         ext = mkConst(m, 0);
-      }
-      else if (d_nativeOps)
-      {
-        return d_engine.mkOp(LsKind::SEXT, {ch[0]}, m);
       }
       else
       {
@@ -543,10 +534,6 @@ uint32_t BvLsSolver::mkOr(uint32_t a, uint32_t b)
 
 uint32_t BvLsSolver::mkXor(uint32_t a, uint32_t b)
 {
-  if (d_nativeOps)
-  {
-    return d_engine.mkOp(LsKind::XOR, {a, b});
-  }
   return mkAnd(mkNot(mkAnd(a, b)), mkNot(mkAnd(mkNot(a), mkNot(b))));
 }
 

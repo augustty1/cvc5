@@ -182,14 +182,6 @@ name   = "Bitvector Theory"
   help       = "in --bv-ls, use constant bits (ternary propagation-based local search, prop-c, FMCAD'20): nodes get ternary domains from the structure of the terms, and values are chosen modulo the constant bits; no effect without --bv-ls"
 
 [[option]]
-  name       = "bvLsNativeOps"
-  category   = "regular"
-  long       = "bv-ls-native-ops"
-  type       = "bool"
-  default    = "false"
-  help       = "in --bv-ls with --bv-ls-const-bits, handle bvxor, bvashr and sign_extend as native local search operators instead of encoding them with the base operators (prop-c+, FMCAD'20); no effect without --bv-ls-const-bits"
-
-[[option]]
   name       = "bvLsNprops"
   category   = "expert"
   long       = "bv-ls-nprops=N"

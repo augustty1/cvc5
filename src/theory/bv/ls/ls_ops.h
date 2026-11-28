@@ -37,10 +37,6 @@ namespace ls {
  * in SMT-LIB: x / 0 = ones and x mod 0 = x. Shifts follow SMT-LIB: both
  * operands have the same width and shifting by w or more bits gives 0 (FMSD'17
  * instead restricts w to 2^q with a q-bit shift amount).
- *
- * The kinds after ITE are the operators that prop-c+ handles natively
- * (FMCAD'20 Sec. V); without them the adapter encodes them with the base
- * operators.
  */
 enum class LsKind
 {
@@ -59,13 +55,10 @@ enum class LsKind
   CONCAT,   // x o y, x is the most significant part
   EXTRACT,  // x[hi:lo]
   ITE,      // c ? x : y, c of width 1
-  XOR,      // x ^ y
-  SEXT,     // x sign-extended by n bits (n = OpInfo::hi)
-  ASHR,     // x >> y (arithmetic)
 };
 
 /** The number of kinds. */
-constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::ASHR) + 1;
+constexpr uint32_t kNumLsKinds = static_cast<uint32_t>(LsKind::ITE) + 1;
 
 const char* toString(LsKind k);
 std::ostream& operator<<(std::ostream& os, LsKind k);
@@ -73,10 +66,7 @@ std::ostream& operator<<(std::ostream& os, LsKind k);
 /** Return the number of children of an operator of kind k (0 for leaves). */
 uint32_t arity(LsKind k);
 
-/**
- * An operator: its kind and, for EXTRACT, the indices hi >= lo; for SEXT, hi
- * is the number n >= 1 of bits added.
- */
+/** An operator: its kind and, for EXTRACT, the indices hi >= lo. */
 struct OpInfo
 {
   LsKind kind;
@@ -177,8 +167,7 @@ LsValue inverseValue(const OpInfo& op,
 /**
  * Return a random value x' for child posX such that op evaluates to t for
  * some values of the other children. For the base operators such a value
- * always exists. For SEXT it exists iff isInvertible holds (the only
- * consistent value is the inverse value), which this requires.
+ * always exists.
  */
 LsValue consistentValue(const OpInfo& op,
                         uint32_t posX,
@@ -247,8 +236,7 @@ LsValue inverseValue(const OpInfo& op,
  * to t for some values of the other children (a consistent value modulo
  * constant bits, FMCAD'20 Tables IV-V), or nothing if there is none, which
  * makes the move end in a conflict. If x has no fixed bits this is
- * consistentValue(op, posX, t, ch, rng), with the same random draws, except
- * that for SEXT it is nothing if t is not a sign extension.
+ * consistentValue(op, posX, t, ch, rng), with the same random draws.
  *
  * Every consistent value matching x has a non-zero probability, except for
  * the branches of ITE, whose only value is t. The result is nothing iff no
@@ -272,10 +260,9 @@ std::optional<LsValue> tryConsistentValue(const OpInfo& op,
  * Return a domain that the value of op matches whenever the values of its
  * children match doms, computed at the word level (plan Sec. 5.2). It is
  * exact (a bit is fixed iff it is the same for all those values) for NOT,
- * AND, XOR, ADD, CONCAT, EXTRACT, SEXT, ITE, SHL, LSHR, ASHR, EQ and ULT, and
- * when all children are fixed. For MUL, UDIV and UREM it fixes the bits that
- * "known bits" rules and the bounds of the result determine, which may be
- * fewer.
+ * AND, ADD, CONCAT, EXTRACT, ITE, SHL, LSHR, EQ and ULT, and when all children
+ * are fixed. For MUL, UDIV and UREM it fixes the bits that "known bits" rules
+ * and the bounds of the result determine, which may be fewer.
  */
 TernaryDomain forwardDomain(const OpInfo& op, const LsDomains& doms);
 

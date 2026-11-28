@@ -112,12 +112,6 @@ class BvLsSolver : protected EnvObj
   uint32_t mkFold(LsKind k, const std::vector<uint32_t>& ids);
 
   LsEngine d_engine;
-  /**
-   * True if bvxor, bvashr and sign_extend become the native operators XOR,
-   * ASHR and SEXT (prop-c+, --bv-ls-native-ops with --bv-ls-const-bits);
-   * otherwise they are encoded with the base operators.
-   */
-  bool d_nativeOps;
   /** The engine node of each translated term. */
   std::unordered_map<Node, uint32_t> d_nodeMap;
   /** Constant leaves by (width, value), so equal constants share a node. */

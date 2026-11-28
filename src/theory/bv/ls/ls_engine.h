@@ -123,9 +123,7 @@ class LsEngine
    * return the same node. If all children are constants, the result is a
    * constant leaf; an ITE with a constant condition is its selected branch.
    * With constant bits, a node whose domain is fixed is also a constant leaf:
-   * no assignment can change its value (plan D14). hi and lo are the indices
-   * of EXTRACT; for SEXT, hi is the number of bits added; otherwise they are
-   * ignored.
+   * no assignment can change its value (plan D14).
    */
   uint32_t mkOp(LsKind k,
                 const std::vector<uint32_t>& children,

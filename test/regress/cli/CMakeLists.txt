@@ -702,8 +702,6 @@ set(regress_0_tests
   regress0/bv/ls/ls-cbits-purify.smt2
   regress0/bv/ls/ls-cbits-sat.smt2
   regress0/bv/ls/ls-cbits-unsat.smt2
-  regress0/bv/ls/ls-cplus-sat.smt2
-  regress0/bv/ls/ls-cplus-unsat.smt2
   regress0/bv/ls/ls-incremental.smt2
   regress0/bv/ls/ls-sat-arith.smt2
   regress0/bv/ls/ls-sat-fallback.smt2
